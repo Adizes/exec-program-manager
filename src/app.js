@@ -423,6 +423,13 @@ function userModal(u) {
   var claim = selectEl([{ value: '', label: '—' }].concat((S.boot.smes || []).filter(function (s) { return !s.email; }).map(function (s) { return { value: s.name, label: s.name }; })), '');
   var m = modal(isNew ? 'Invite person' : 'Edit ' + (u.name || u.email), [field('Email (@adizes.com)', email), field('Name', name), field('Role', role),
     field('Link imported name', claim, 'Attaches blocks and ratings recorded under this name to this account.'),
+    !isNew && (u.linkedNames || []).length ? field('Names linked to this account', h('.epm-linked', u.linkedNames.map(function (n) {
+      return h('span.epm-linked-i', badge(n, 'info'), btn('Unlink', { kind: 'ghost', title: 'Blocks and ratings under “' + n + '” stop belonging to this account' }, function () {
+        confirmBox('Unlink “' + n + '”?', 'Blocks, sessions and ratings recorded as “' + n + '” go back to that name without an account. You can then link it to someone else.', 'Unlink', true).then(function (ok) {
+          if (ok) api('users.unlinkName', { email: u.email, name: n }).then(function () { m.close(); toast('“' + n + '” unlinked'); S.cohorts = {}; refreshBoot().then(render); }).catch(fail);
+        });
+      }));
+    })), 'Shown as SME names in blocks; unlink one if it was attached to the wrong person.') : null,
     !isNew ? h('label.epm-check', active, h('span', 'Active (can sign in)')) : h('p.epm-small.epm-muted', 'They receive an email with the link to sign in.')], {
     footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn(isNew ? 'Invite' : 'Save', { kind: 'primary' }, function () {
       api('users.save', { user: { email: email.value, name: name.value, role: role.value, active: active.checked }, claimName: claim.value }).then(function () {

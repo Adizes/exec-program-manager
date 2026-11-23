@@ -358,6 +358,8 @@ await step('SME performance chart', async () => {
 });
 await step('team & settings pages render', async () => {
   await page.goto(URL0 + '/#/team'); await page.waitForSelector('text=Invite person'); await shot(page, '14-team');
+  await page.click('.epm-table-click tr:has-text("shoham@adizes.com")'); await page.waitForSelector('.epm-modal:has-text("Names linked to this account")');
+  await shot(page, '14b-team-linked'); await page.keyboard.press('Escape');
   await page.goto(URL0 + '/#/settings'); await page.waitForSelector('text=Import from the old Matrix sheets'); await shot(page, '15-settings');
   await page.goto(URL0 + '/#/learners'); await page.waitForSelector('.epm-chip');
 });

@@ -467,3 +467,4 @@ a.epm-mchip:hover { background: #ebebe8; }
 .epm-dtable td:nth-child(2) { min-width: 220px; } .epm-dtable td:nth-child(3) select { min-width: 160px; }
 .epm-dtable td:nth-child(6) { display: table-cell; } .epm-dtable td:nth-child(6) .epm-badge { margin: 0 4px 4px 0; display: inline-block; }
 @media (max-width: 900px) { .epm-drafts { grid-template-columns: 1fr; } .epm-dlist { position: static; } }
+.epm-linked { display: flex; flex-wrap: wrap; gap: 8px; } .epm-linked-i { display: inline-flex; align-items: center; gap: 2px; }

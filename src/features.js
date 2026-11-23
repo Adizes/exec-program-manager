@@ -374,6 +374,7 @@ function buildReportPdf(ctx, email, comment) {
     // comments
     if (comment && comment.trim()) {
       y += 11;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8.8);   // splitTextToSize measures with the current font
       var lines = doc.splitTextToSize(comment.trim(), IW - 10);
       var hgt = Math.min(lines.length, 12) * 4.3 + 12;
       if (y + hgt > 286) { doc.addPage(); y = 20; }

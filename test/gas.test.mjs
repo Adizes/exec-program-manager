@@ -463,6 +463,22 @@ if (dir && existsSync(dir)) {
     const perf = post({ action: 'sme.performance', token: pm, sme: 'name:pavel' });
     assert.ok(perf.module.x.every(x => x !== 'Other'), 'no "Other" block: ' + perf.module.x.join(', '));
   });
+  t('unlink an imported SME name from an account, then link it again', () => {
+    post({ action: 'users.save', token: pm, user: { email: 'pavel@adizes.com', name: 'Pavel', role: 'SME' }, claimName: 'Pavel', sendInvite: false });
+    let B = post({ action: 'bootstrap', token: pm });
+    const u = B.users.find(x => x.email === 'pavel@adizes.com');
+    assert.ok(u.linkedNames.length >= 1, 'linked names listed');
+    assert.ok(!B.smes.some(x => !x.email && x.name === 'Pavel'));
+    // the user becomes a PM: the name stays attached to the account
+    post({ action: 'users.save', token: pm, user: { email: 'pavel@adizes.com', name: 'Pavel', role: 'PM' } });
+    const r = post({ action: 'users.unlinkName', token: pm, email: 'pavel@adizes.com', name: u.linkedNames[0] });
+    assert.equal(r.ok, true); assert.ok(r.counts.Blocks > 0);
+    B = post({ action: 'bootstrap', token: pm });
+    assert.ok(B.smes.some(x => !x.email && x.key === 'name:' + u.linkedNames[0].toLowerCase()), 'name available again');
+    assert.equal(B.users.find(x => x.email === 'pavel@adizes.com').linkedNames.length, 0);
+    post({ action: 'users.save', token: pm, user: { email: 'pavel@adizes.com', name: 'Pavel', role: 'SME' }, claimName: u.linkedNames[0] });
+    assert.ok(post({ action: 'bootstrap', token: pm }).users.find(x => x.email === 'pavel@adizes.com').linkedNames.length >= 1);
+  });
   t('summaries for imported cohorts', () => {
     const b = post({ action: 'bootstrap', token: pm });
     b.cohorts.forEach(c => console.log('     ', c.name.padEnd(14), 'learners', c.learners, 'att', c.attendance == null ? '-' : (c.attendance * 100).toFixed(1) + '%',

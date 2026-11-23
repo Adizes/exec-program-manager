@@ -302,6 +302,7 @@ const STAFF_ACTIONS = {
   'lms.detail': [(b, u) => lmsDetail_(b, u), ['PM', 'SME'], false],
   'typeform.sync': [(b, u) => typeformSync_(u), ['PM'], true],
   'users.save': [(b, u) => userSave_(b, u), ['PM'], true],
+  'users.unlinkName': [(b, u) => userUnlinkName_(b, u), ['PM'], true],
   'settings.save': [(b, u) => settingsSave_(b, u), ['PM'], true],
   'import.cohort': [(b, u) => importCohort_(b, u), ['PM'], true],
   'sme.performance': [(b, u) => smePerformance_(b, u), ['PM', 'SME'], false],
@@ -442,7 +443,10 @@ function bootstrap_(user) {
     today: today_(),
   };
   if (user.role === 'PM') {
-    out.users = rows_('Users').map(u => pick_(u, ['email', 'name', 'role', 'active', 'lastLoginAt']));
+    const linked = {};
+    rows_('Blocks').forEach(x => { const n = String(x.smeName || '').trim(); if (x.smeEmail && n) (linked[x.smeEmail] = linked[x.smeEmail] || {})[n.toLowerCase()] = n; });
+    out.users = rows_('Users').map(u => Object.assign(pick_(u, ['email', 'name', 'role', 'active', 'lastLoginAt']),
+      { linkedNames: Object.keys(linked[u.email] || {}).map(k => linked[u.email][k]) }));
     out.emailTemplates = templatesAll_();
     out.integrations = integrations_();
     out.template = DEFAULT_TEMPLATE;
@@ -1376,6 +1380,20 @@ function userSave_(b, user) {
     if (hit4) rewrite_('ModuleFeedback', out4);
   }
   return { ok: true };
+}
+// Undo "Link imported name": blocks, sessions and ratings recorded under that name go back to
+// the plain name (no account), so it can be linked to another person.
+function userUnlinkName_(b) {
+  const email = normEmail_(b.email), n = normName_(b.name);
+  if (!email || !n) throw new Error('invalid_name');
+  const counts = {};
+  [['Blocks', false], ['Sessions', false], ['WeeklyFeedback', true], ['ModuleFeedback', true]].forEach(([t, loose]) => {
+    let hit = 0;
+    const out = rows_(t).map(x => (x.smeEmail === email && (loose ? smeNameMatches_(x.smeName, n) : normName_(x.smeName) === n)) ? (hit++, Object.assign({}, x, { smeEmail: '' })) : x);
+    if (hit) rewrite_(t, out);
+    counts[t] = hit;
+  });
+  return { ok: true, counts: counts };
 }
 // "Pavel G." matches "Pavel"; "Rodrigo, David" matches both
 function smeNameMatches_(raw, n) {
