@@ -69,9 +69,10 @@ ul,ol{padding-left:40px;margin-top:0;margin-bottom:10px} li{list-style:disc} p{m
       return;
     }
     if (u.pathname === '/exec-result') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(results.get(u.searchParams.get('k')) || '{}'); return; }
-    if (u.pathname === '/__emails') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(G.state.emails.slice(-20))); return; }
-    if (u.pathname === '/' || u.pathname === '/index.html') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page({ endpoint: '/exec', assets: '/assets/' })); return; }
-    if (u.pathname === '/profile') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page({ endpoint: '/exec', mode: 'learner', assets: '/assets/' })); return; }
+    if (u.pathname === '/__emails') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(G.state.emails.slice(-20).map(m => ({ to: m.to, subject: m.subject, body: m.body, attachments: ((m.options || {}).attachments || []).length })))); return; }
+    if (u.pathname === '/' || u.pathname === '/index.html') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page({ endpoint: '/exec', assets: '/assets/', jspdfUrl: '/vendor/jspdf.js' })); return; }
+    if (u.pathname === '/profile') { res.writeHead(200, { 'Content-Type': 'text/html' }); res.end(page({ endpoint: '/exec', mode: 'learner', assets: '/assets/', jspdfUrl: '/vendor/jspdf.js' })); return; }
+    if (u.pathname === '/vendor/jspdf.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }); res.end(readFileSync(join(root, 'node_modules/jspdf/dist/jspdf.umd.min.js'))); return; }
     const file = join(root, u.pathname);
     if ((u.pathname.startsWith('/dist/') || u.pathname.startsWith('/assets/')) && existsSync(file)) {
       res.writeHead(200, { 'Content-Type': { '.js': 'text/javascript', '.png': 'image/png' }[extname(file)] || 'application/octet-stream' });

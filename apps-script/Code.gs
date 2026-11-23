@@ -24,11 +24,16 @@ const CONFIG = {
   ALLOWED_DOMAINS: ['adizes.com'],              // staff must sign in with one of these
   INITIAL_PMS: ['execprogram@adizes.com'],      // created as Program Managers by setup()
   PORTAL_URL: 'https://www.adizes.com/exec-program-manager',   // Webflow page with the staff app
-  LEARNER_URL: 'https://www.adizes.com/exec-program-profile',  // Webflow page with the learner form
+  LEARNER_URL: 'https://www.adizes.com/exec-program-profile',  // Webflow page with the learner forms (registration + goals)
   EMAIL: {
-    FROM_ADDRESS: '',                 // leave empty: mail goes out from the account that runs the script
+    // Every email leaves from this address. Deploy the web app with this account ("Execute as: Me"),
+    // or add it as a "Send mail as" alias of the account that deploys it.
+    FROM_ADDRESS: 'execprogram@adizes.com',
     FROM_NAME: 'Adizes Executive Program',
   },
+  // Link sent to SMEs in the reminder; {id} = Teachable course ID of the block
+  TEACHABLE_CURRICULUM_URL: 'https://courses.adizes.com/admin/courses/{id}/curriculum',
+  SME_REMINDER_DAYS: 7,
   ASSETS_BASE: 'https://cdn.jsdelivr.net/gh/Adizes/exec-program-manager@v1.0.0/assets/',
   SESSION_DAYS: 30,
   CODE_MINUTES: 10,
@@ -60,7 +65,7 @@ const OPTIONS = {
 const INACTIVE_STATUSES = ['Dropped Out', 'Moved to next cohort'];
 // Statuses with no live attendance FROM their statusDate on (sessions after that date do not count)
 const NO_LIVE_STATUSES = INACTIVE_STATUSES.concat(['Asynchronous']);
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 function attendanceApplies_(e, date) {
   if (NO_LIVE_STATUSES.indexOf(e.status) < 0) return true;
   return !!(e.statusDate && date && date <= e.statusDate);
@@ -85,10 +90,10 @@ const SCHEMA = {
   Settings: { key: 'key', cols: ['key', 'value'] },
   Cohorts: {
     key: 'id', cols: ['id', 'name', 'code', 'language', 'startDate', 'status', 'teachableBundleId', 'zoomMeetingId', 'zoomLink',
-      'moduleFeedbackFormId', 'notes', 'createdAt', 'updatedAt', 'lastLmsSync', 'lastLmsSyncResult'],
+      'moduleFeedbackFormId', 'notes', 'createdAt', 'updatedAt', 'lastLmsSync', 'lastLmsSyncResult', 'regToken'],
   },
   Blocks: {
-    key: 'id', cols: ['id', 'cohortId', 'order', 'kind', 'number', 'title', 'smeEmail', 'smeName', 'smeSeesFeedback', 'teachableCourseId'],
+    key: 'id', cols: ['id', 'cohortId', 'order', 'kind', 'number', 'title', 'smeEmail', 'smeName', 'smeSeesFeedback', 'teachableCourseId', 'reminderSentAt'],
     types: { order: 'n', smeSeesFeedback: 'b' },
   },
   Sessions: {
@@ -129,6 +134,9 @@ const SCHEMA = {
   },
   LmsCourses: { key: 'courseId', cols: ['courseId', 'name', 'structure', 'updatedAt'], types: { structure: 'j' } },
   Log: { key: 'at', cols: ['at', 'email', 'action', 'detail'] },
+  // Planner: cohort drafts (design) and SME time off
+  Drafts: { key: 'id', cols: ['id', 'name', 'data', 'createdBy', 'createdAt', 'updatedAt'], types: { data: 'j' } },
+  Unavailability: { key: 'id', cols: ['id', 'smeKey', 'from', 'to', 'note', 'createdBy', 'createdAt'] },
 };
 
 /* ----------------------------------------------------------------------------------
@@ -158,41 +166,71 @@ const GOALS_QUESTIONS = {
 };
 
 /* ----------------------------------------------------------------------------------
- * Email templates. {first}, {cohort}, {link} are replaced. Texts marked PENDING are
- * placeholders until the final copy is provided.
+ * Email templates (defaults). The Program Manager can rewrite any of them in
+ * Settings → Email templates; those versions are stored in the Settings tab.
+ * {placeholders} are replaced for each person. "pending" templates cannot be sent
+ * (automatic ones are skipped) until someone saves their text in Settings.
  * ---------------------------------------------------------------------------------- */
 const EMAILS = {
-  profile: {
-    en: { subject: 'Adizes Executive Program · Complete your participant profile',
-      body: 'Hi {first},\n\nWelcome to the Adizes Executive Program ({cohort}). To prepare your experience, please take a few minutes to complete your participant profile and share your goals for the program.',
-      cta: 'Complete my profile' },
-    es: { subject: 'Adizes Executive Program · Completa tu perfil de participante',
-      body: 'Hola, {first}:\n\nTe damos la bienvenida al Adizes Executive Program ({cohort}). Para preparar tu experiencia, tómate unos minutos para completar tu perfil de participante y compartirnos tus objetivos para el programa.',
-      cta: 'Completar mi perfil' },
-    category: 'Onboarding',
+  registration: {
+    label: 'Registration form', to: 'learner', vars: ['first', 'cohort', 'link'], category: 'Onboarding',
+    en: { subject: 'Adizes Executive Program · Complete your registration',
+      body: 'Hi {first},\n\nWelcome to the Adizes Executive Program ({cohort}). Please complete your registration so we can prepare your experience.',
+      cta: 'Complete my registration' },
+    es: { subject: 'Adizes Executive Program · Completa tu inscripción',
+      body: 'Hola, {first}:\n\nTe damos la bienvenida al Adizes Executive Program ({cohort}). Completa tu inscripción para que podamos preparar tu experiencia.',
+      cta: 'Completar mi inscripción' },
+  },
+  goals: {
+    label: 'Goals & intentions', to: 'learner', vars: ['first', 'cohort', 'link'], category: 'Surveys',
+    en: { subject: 'Adizes Executive Program · Your goals and intentions',
+      body: 'Hi {first},\n\nBefore we start, we would like to know what you want to get out of the program. It takes about 10 minutes.',
+      cta: 'Share my goals' },
+    es: { subject: 'Adizes Executive Program · Tus objetivos e intenciones',
+      body: 'Hola, {first}:\n\nAntes de comenzar nos gustaría saber qué quieres obtener del programa. Toma unos 10 minutos.',
+      cta: 'Compartir mis objetivos' },
   },
   moduleFeedback: {
+    label: 'Module feedback survey', to: 'learner', vars: ['first', 'cohort', 'module', 'link'], category: 'Surveys',
     en: { subject: 'Adizes Executive Program · Share your feedback on {module}',
       body: 'Hi {first},\n\nWe would love to hear how {module} went for you. The survey takes about 3 minutes and helps us improve the program for you and future cohorts.',
       cta: 'Answer the survey' },
     es: { subject: 'Adizes Executive Program · Cuéntanos cómo te fue en {module}',
       body: 'Hola, {first}:\n\nNos encantaría saber cómo te fue en {module}. La encuesta toma unos 3 minutos y nos ayuda a mejorar el programa para ti y para las siguientes generaciones.',
       cta: 'Responder la encuesta' },
-    category: 'Surveys',
+  },
+  booksCode: {
+    label: 'Books code', to: 'learner', vars: ['first', 'cohort', 'code'], category: 'Books', pending: true,
+    en: { subject: 'Adizes Executive Program · Your books code', body: 'Hi {first},\n\nYour books code is: {code}\n\n[PENDING TEXT — instructions to redeem the books]', cta: '' },
+    es: { subject: 'Adizes Executive Program · Tu código de libros', body: 'Hola, {first}:\n\nTu código de libros es: {code}\n\n[TEXTO PENDIENTE — instrucciones para canjear los libros]', cta: '' },
+  },
+  progressReport: {
+    label: 'Progress report (PDF attached)', to: 'learner', vars: ['first', 'cohort'], category: 'Other',
+    en: { subject: 'Adizes Executive Program · Your progress report',
+      body: 'Hi {first},\n\nAttached you will find your progress report for the Adizes Executive Program ({cohort}): attendance, LMS progress and the courses ahead.\n\nIf you need help with anything, just reply to this email.', cta: '' },
+    es: { subject: 'Adizes Executive Program · Tu reporte de avance',
+      body: 'Hola, {first}:\n\nTe compartimos tu reporte de avance del Adizes Executive Program ({cohort}): asistencia, avance en el LMS y los cursos que siguen.\n\nSi necesitas ayuda con algo, responde a este correo.', cta: '' },
   },
   certificate: {
-    pending: true,
+    label: 'Certificate', to: 'learner', vars: ['first', 'cohort'], category: 'Other', pending: true,
     en: { subject: 'Adizes Executive Program · Your certificate', body: 'Hi {first},\n\n[PENDING TEXT — certificate email]', cta: '' },
     es: { subject: 'Adizes Executive Program · Tu certificado', body: 'Hola, {first}:\n\n[TEXTO PENDIENTE — correo del certificado]', cta: '' },
-    category: 'Other',
   },
   linkedin: {
-    pending: true,
+    label: 'LinkedIn tutorial', to: 'learner', vars: ['first', 'cohort'], category: 'Other', pending: true,
     en: { subject: 'Adizes Executive Program · Add the program to your LinkedIn', body: 'Hi {first},\n\n[PENDING TEXT — LinkedIn tutorial]', cta: '' },
     es: { subject: 'Adizes Executive Program · Agrega el programa a tu LinkedIn', body: 'Hola, {first}:\n\n[TEXTO PENDIENTE — tutorial de LinkedIn]', cta: '' },
-    category: 'Other',
   },
-  custom: { en: { subject: '', body: '', cta: '' }, es: { subject: '', body: '', cta: '' }, category: 'Other' },
+  smeReminder: {
+    label: 'SME reminder (1 week before the course)', to: 'sme', vars: ['sme', 'course', 'cohort', 'startDate', 'sessions', 'curriculumLink', 'portalLink'], category: 'Other', pending: true,
+    en: { subject: 'Reminder · {course} starts on {startDate} ({cohort})',
+      body: 'Hi {sme},\n\nThis is a reminder that your course {course} with {cohort} starts on {startDate}.\n\nSessions:\n{sessions}\n\nCurriculum in Teachable: {curriculumLink}\n\nCohort progress in the Exec Program Manager: {portalLink}\n\n[PENDING TEXT — Dani’s template]',
+      cta: 'Open the Exec Program Manager' },
+    es: { subject: 'Recordatorio · {course} empieza el {startDate} ({cohort})',
+      body: 'Hola, {sme}:\n\nTe recordamos que tu curso {course} con {cohort} empieza el {startDate}.\n\nSesiones:\n{sessions}\n\nCurrículum en Teachable: {curriculumLink}\n\nAvance del cohort en el Exec Program Manager: {portalLink}\n\n[TEXTO PENDIENTE — plantilla de Dani]',
+      cta: 'Abrir el Exec Program Manager' },
+  },
+  custom: { label: 'Custom message', to: 'learner', vars: ['first', 'cohort'], category: 'Other', en: { subject: '', body: '', cta: '' }, es: { subject: '', body: '', cta: '' } },
 };
 const EMAIL_SIGN = { en: 'The Adizes Executive Program team', es: 'El equipo del Adizes Executive Program' };
 
@@ -230,6 +268,8 @@ const PUBLIC_ACTIONS = {
   'auth.verify': (b) => authVerify_(b),
   'learner.get': (b) => learnerGet_(b),
   'learner.save': (b) => withLock_(() => learnerSave_(b)),
+  'reg.get': (b) => regGet_(b),
+  'reg.save': (b) => withLock_(() => regSave_(b)),
 };
 
 // [handler, roles allowed, mutates?]
@@ -244,7 +284,7 @@ const STAFF_ACTIONS = {
   'session.update': [(b, u) => sessionUpdate_(b, u), ['PM'], true],
   'learner.add': [(b, u) => learnerAdd_(b, u), ['PM'], true],
   'learner.update': [(b, u) => learnerUpdate_(b, u), ['PM'], true],
-  'learner.sendProfileLink': [(b, u) => learnerSendProfileLink_(b, u), ['PM'], true],
+
   'learners.all': [(b, u) => learnersAll_(b, u), ['PM'], false],
   'enrollment.update': [(b, u) => enrollmentUpdate_(b, u), ['PM'], true],
   'enrollment.move': [(b, u) => enrollmentMove_(b, u), ['PM'], true],
@@ -265,6 +305,17 @@ const STAFF_ACTIONS = {
   'settings.save': [(b, u) => settingsSave_(b, u), ['PM'], true],
   'import.cohort': [(b, u) => importCohort_(b, u), ['PM'], true],
   'sme.performance': [(b, u) => smePerformance_(b, u), ['PM', 'SME'], false],
+  'weekly.replace': [(b, u) => weeklyReplace_(b, u), ['PM'], true],
+  'templates.save': [(b, u) => templateSave_(b, u), ['PM'], true],
+  'templates.test': [(b, u) => templateTest_(b, u), ['PM'], false],
+  'sme.remind': [(b, u) => smeRemind_(b, u), ['PM'], true],
+  'report.send': [(b, u) => reportSend_(b, u), ['PM'], true],
+  'cohort.regLink': [(b, u) => cohortRegLink_(b, u), ['PM'], true],
+  'planner.get': [(b, u) => plannerGet_(b, u), ['PM', 'SME'], false],
+  'draft.save': [(b, u) => draftSave_(b, u), ['PM'], true],
+  'draft.delete': [(b, u) => deleteById_('Drafts', b.id, u), ['PM'], true],
+  'unavail.save': [(b, u) => unavailSave_(b, u), ['PM', 'SME'], true],
+  'unavail.delete': [(b, u) => unavailDelete_(b, u), ['PM', 'SME'], true],
 };
 
 function route_(b) {
@@ -285,7 +336,7 @@ function route_(b) {
 function logDetail_(b) {
   const copy = {};
   Object.keys(b).forEach(k => {
-    if (k === 'token' || k === 'data' || k === 'action') return;
+    if (k === 'token' || k === 'data' || k === 'action' || k === 'pdfBase64') return;
     const v = b[k];
     copy[k] = typeof v === 'string' ? v.slice(0, 80) : Array.isArray(v) ? '[' + v.length + ']' : (v && typeof v === 'object' ? '{…}' : v);
   });
@@ -392,7 +443,7 @@ function bootstrap_(user) {
   };
   if (user.role === 'PM') {
     out.users = rows_('Users').map(u => pick_(u, ['email', 'name', 'role', 'active', 'lastLoginAt']));
-    out.emailTemplates = Object.keys(EMAILS).reduce((m, k) => { m[k] = { pending: !!EMAILS[k].pending, en: EMAILS[k].en, es: EMAILS[k].es, category: EMAILS[k].category }; return m; }, {});
+    out.emailTemplates = templatesAll_();
     out.integrations = integrations_();
     out.template = DEFAULT_TEMPLATE;
   }
@@ -404,6 +455,7 @@ function integrations_() {
   return {
     teachable: !!(p.getProperty('TEACHABLE_API_KEY') && p.getProperty('TEACHABLE_BASIC_USER') && p.getProperty('TEACHABLE_BASIC_PASS')),
     typeform: !!p.getProperty('TYPEFORM_TOKEN'),
+    sender: senderStatus_(),
   };
 }
 
@@ -519,6 +571,9 @@ function cohortGet_(b, user) {
     out.otherCohorts = rows_('Cohorts').filter(c => c.id !== id).map(c => pick_(c, ['id', 'name', 'status', 'language', 'startDate']));
     const fid = cohort.moduleFeedbackFormId || settings_()['typeformModuleFormId_' + (cohort.language || 'en')] || '';
     out.moduleFormId = fid;
+    out.registrationLink = cohort.regToken ? regUrl_(cohort.regToken) : '';
+    out.learnerUrl = CONFIG.LEARNER_URL;
+    out.curriculumUrl = CONFIG.TEACHABLE_CURRICULUM_URL;
   }
   return out;
 }
@@ -534,6 +589,7 @@ function cohortCreate_(b, user) {
     startDate: cleanDate_(d.startDate), status: OPTIONS.cohortStatus.indexOf(d.status) >= 0 ? d.status : 'Planned',
     teachableBundleId: clean_(d.teachableBundleId, 20), zoomMeetingId: clean_(d.zoomMeetingId, 40), zoomLink: clean_(d.zoomLink, 300),
     moduleFeedbackFormId: clean_(d.moduleFeedbackFormId, 40), notes: clean_(d.notes, 2000), createdAt: now, updatedAt: now,
+    regToken: randomToken_(24),
   };
   insert_('Cohorts', [cohort]);
   if (b.structure) writeStructure_(cohort.id, b.structure.blocks || [], b.structure.sessions || []);
@@ -583,7 +639,8 @@ function writeStructure_(cohortId, blocksIn, sessionsIn) {
     return {
       id: id, cohortId: cohortId, order: i + 1, kind: OPTIONS.blockKinds.indexOf(x.kind) >= 0 ? x.kind : 'course',
       number: clean_(x.number, 10), title: clean_(x.title, 200), smeEmail: normEmail_(x.smeEmail), smeName: clean_(x.smeName, 80),
-      smeSeesFeedback: !!x.smeSeesFeedback, teachableCourseId: clean_(x.teachableCourseId, 20),
+      smeSeesFeedback: x.smeSeesFeedback !== false, teachableCourseId: clean_(x.teachableCourseId, 20),
+      reminderSentAt: clean_(x.reminderSentAt, 40),
     };
   });
   const sessions = sessionsIn.map((x, i) => {
@@ -656,7 +713,6 @@ function learnerAdd_(b, user) {
       certificationSent: '', statusChangedAt: now, createdAt: now }]);
     added.push(p.email);
   });
-  if (b.sendProfileLink) added.forEach(email => { try { sendProfileLink_(email, cohort, user); } catch (e) { skipped.push({ email: email, reason: 'email_failed: ' + e.message }); } });
   return { ok: true, added: added, skipped: skipped };
 }
 
@@ -785,52 +841,88 @@ function latestEnrollment_(email) {
   return list[0] ? { enrollment: list[0], cohort: cohorts[list[0].cohortId] } : null;
 }
 
+// Personal link (?t=…): Goals & intentions only. Personal data comes from the registration form.
 function learnerGet_(b) {
   const l = learnerByToken_(b.t);
   const le = latestEnrollment_(l.email);
   const lang = le && le.cohort.language === 'es' ? 'es' : 'en';
   const goals = le ? rows_('Goals').find(g => g.cohortId === le.cohort.id && g.email === l.email) : null;
   return {
-    ok: true, lang: lang, cohort: le ? le.cohort.name : '',
-    profile: pick_(l, ['email', 'firstName', 'lastName', 'company', 'jobTitle', 'profile', 'birthday', 'address', 'phone', 'linkedin']),
+    ok: true, lang: lang, cohort: le ? le.cohort.name : '', firstName: l.firstName || '',
     goals: goals ? [1, 2, 3, 4, 5, 6, 7, 8].map(i => goals['a' + i] || '') : ['', '', '', '', '', '', '', ''],
-    questions: GOALS_QUESTIONS[lang], profileOptions: OPTIONS.profile, submittedAt: l.profileSubmittedAt || '',
+    questions: GOALS_QUESTIONS[lang], submittedAt: goals ? goals.submittedAt || '' : '',
   };
 }
 
 function learnerSave_(b) {
   const l = learnerByToken_(b.t);
-  const p = b.profile || {};
-  const now = new Date().toISOString();
-  const patch = { updatedAt: now, profileSubmittedAt: now };
-  ['firstName', 'lastName', 'company', 'jobTitle', 'address', 'phone', 'linkedin'].forEach(k => { if (k in p) patch[k] = clean_(p[k], k === 'address' ? 500 : 160); });
-  if ('birthday' in p) patch.birthday = cleanDate_(p.birthday);
-  if ('profile' in p) patch.profile = (Array.isArray(p.profile) ? p.profile : []).filter(x => OPTIONS.profile.indexOf(x) >= 0);
-  if (!patch.firstName && !l.firstName) throw new Error('invalid_name');
-  update_('Learners', l.email, patch);
   const le = latestEnrollment_(l.email);
-  if (le && Array.isArray(b.goals)) {
-    const g = { id: le.cohort.id + '|' + l.email, cohortId: le.cohort.id, email: l.email, submittedAt: now };
-    for (let i = 0; i < 8; i++) g['a' + (i + 1)] = clean_(b.goals[i], 3000);
-    upsert_('Goals', [g]);
-  }
+  if (!le) throw new Error('invalid_link');
+  if (!Array.isArray(b.goals)) throw new Error('invalid_goals');
+  const g = { id: le.cohort.id + '|' + l.email, cohortId: le.cohort.id, email: l.email, submittedAt: new Date().toISOString() };
+  for (let i = 0; i < 8; i++) g['a' + (i + 1)] = clean_(b.goals[i], 3000);
+  upsert_('Goals', [g]);
   return { ok: true };
 }
 
-function learnerSendProfileLink_(b, user) {
-  const cohort = rows_('Cohorts').find(c => c.id === b.cohortId);
-  if (!cohort) throw new Error('not_found');
-  const emails = (b.emails || [b.email]).map(normEmail_).filter(Boolean);
-  const sent = [];
-  emails.forEach(e => { sendProfileLink_(e, cohort, user); sent.push(e); });
-  return { ok: true, sent: sent };
+/* ----- registration form per cohort (?c=…): everyone fills their own data ----- */
+const REG_REQUIRED = ['firstName', 'lastName', 'email', 'company', 'jobTitle', 'birthday', 'phone'];
+function regUrl_(token, email) {
+  return CONFIG.LEARNER_URL + (CONFIG.LEARNER_URL.indexOf('?') >= 0 ? '&' : '?') + 'c=' + encodeURIComponent(token) + (email ? '&e=' + encodeURIComponent(email) : '');
 }
-
-function sendProfileLink_(email, cohort, user) {
-  let l = rows_('Learners').find(x => x.email === email);
-  if (!l) throw new Error('not_found');
-  if (!l.profileToken) { update_('Learners', email, { profileToken: randomToken_(32) }); l = rows_('Learners').find(x => x.email === email); }
-  sendTemplate_('profile', cohort, l, { link: profileUrl_(l.profileToken) }, user);
+function cohortByRegToken_(c) {
+  c = String(c || '');
+  const cohort = c.length >= 16 ? rows_('Cohorts').find(x => x.regToken === c) : null;
+  if (!cohort) throw new Error('invalid_link');
+  return cohort;
+}
+function regGet_(b) {
+  const cohort = cohortByRegToken_(b.c);
+  const out = { ok: true, lang: cohort.language === 'es' ? 'es' : 'en', cohort: cohort.name, profileOptions: OPTIONS.profile, required: REG_REQUIRED };
+  // prefill only when the link was sent to that person (e=…) and they are in this cohort
+  const e = normEmail_(b.e);
+  if (e && rows_('Enrollments').some(x => x.email === e && x.cohortId === cohort.id)) {
+    const l = rows_('Learners').find(x => x.email === e);
+    if (l) out.prefill = pick_(l, ['email', 'firstName', 'lastName', 'company', 'jobTitle', 'profile', 'birthday', 'address', 'phone', 'linkedin']);
+  }
+  return out;
+}
+function regSave_(b) {
+  const cohort = cohortByRegToken_(b.c);
+  if (b.hp) return { ok: true };                  // honeypot: bots fill hidden fields
+  const cache = CacheService.getScriptCache();
+  const k = 'regcount_' + cohort.id, n = Number(cache.get(k) || 0);
+  if (n > 60) throw new Error('invalid_too_many');
+  cache.put(k, String(n + 1), 600);
+  const p = b.profile || {};
+  const rec = {
+    email: normEmail_(p.email), firstName: clean_(p.firstName, 80), lastName: clean_(p.lastName, 80), company: clean_(p.company, 160),
+    jobTitle: clean_(p.jobTitle, 160), birthday: cleanDate_(p.birthday), phone: clean_(p.phone, 60), linkedin: clean_(p.linkedin, 300),
+    address: clean_(p.address, 500), profile: (Array.isArray(p.profile) ? p.profile : []).filter(x => OPTIONS.profile.indexOf(x) >= 0),
+  };
+  if (!isEmail_(rec.email)) throw new Error('invalid_email');
+  const missing = REG_REQUIRED.filter(f => !rec[f]);
+  if (!rec.profile.length) missing.push('profile');
+  if (missing.length) throw new Error('invalid_missing_' + missing.join(','));
+  const now = new Date().toISOString();
+  const old = rows_('Learners').find(x => x.email === rec.email);
+  // the same email answering again overwrites their data (never PAEI, lifecycle or internal fields)
+  const patch = Object.assign({}, rec, { profileSubmittedAt: now, updatedAt: now });
+  delete patch.email;
+  if (old) update_('Learners', rec.email, Object.assign(patch, old.profileToken ? {} : { profileToken: randomToken_(32) }));
+  else insert_('Learners', [Object.assign({ email: rec.email, profileToken: randomToken_(32), createdAt: now }, patch)]);
+  if (!rows_('Enrollments').some(e => e.email === rec.email && e.cohortId === cohort.id)) {
+    insert_('Enrollments', [{ id: newId_('E'), email: rec.email, cohortId: cohort.id, status: 'Enrolled Active', welcomeEmailSent: false,
+      certificationSent: '', statusChangedAt: now, createdAt: now }]);
+  }
+  return { ok: true, updated: !!old };
+}
+function cohortRegLink_(b) {
+  const c = rows_('Cohorts').find(x => x.id === b.cohortId);
+  if (!c) throw new Error('not_found');
+  if (!c.regToken || b.regenerate) update_('Cohorts', c.id, { regToken: randomToken_(24) });
+  const t = rows_('Cohorts').find(x => x.id === c.id).regToken;
+  return { ok: true, link: regUrl_(t) };
 }
 
 /* =================================================================================
@@ -876,6 +968,31 @@ function weeklySave_(b, user) {
   for (let i = 1; i <= 5; i++) rec['q' + i] = score_(r['q' + i], 1, 5);
   upsert_('WeeklyFeedback', [rec]);
   return { ok: true, record: rec };
+}
+
+// Replaces ALL the session feedback of a cohort with the rows of a CSV (parsed in the browser)
+function weeklyReplace_(b, user) {
+  const cohortId = String(b.cohortId || '');
+  if (!rows_('Cohorts').some(c => c.id === cohortId)) throw new Error('not_found');
+  const sessions = {}; rows_('Sessions').filter(s => s.cohortId === cohortId).forEach(s => sessions[s.id] = s);
+  const blocks = {}; rows_('Blocks').filter(x => x.cohortId === cohortId).forEach(x => blocks[x.id] = x);
+  const users = rows_('Users');
+  const now = new Date().toISOString();
+  const recs = (b.records || []).map(r => {
+    const s = sessions[r.sessionId], bl = blocks[r.blockId] || (s ? blocks[s.blockId] : null);
+    const smeName = clean_(r.smeName || (s && s.smeName) || (bl && bl.smeName), 80);
+    let smeEmail = (s && s.smeEmail) || (bl && bl.smeEmail) || '';
+    if (smeName) { const u = users.find(x => x.name && smeNameMatches_(smeName, x.name)); smeEmail = u ? u.email : smeEmail; }
+    const rec = { id: newId_('W'), cohortId: cohortId, sessionId: s ? s.id : '', blockId: bl ? bl.id : '', date: cleanDate_(r.date) || (s ? s.date : ''),
+      email: normEmail_(r.email), nameRaw: r.email ? '' : clean_(r.nameRaw, 120), smeName: smeName, smeEmail: smeEmail,
+      improve: clean_(r.improve, 3000), comments: clean_(r.comments, 3000), source: 'csv', createdBy: user.email, createdAt: now };
+    for (let i = 1; i <= 5; i++) rec['q' + i] = score_(r['q' + i], 1, 5);
+    return rec;
+  });
+  const all = rows_('WeeklyFeedback');
+  const keep = all.filter(w => w.cohortId !== cohortId);
+  rewrite_('WeeklyFeedback', keep.concat(recs));
+  return { ok: true, removed: all.length - keep.length, added: recs.length };
 }
 
 function moduleSave_(b, user) {
@@ -938,53 +1055,209 @@ function conversationSave_(b, user) {
   return { ok: true, ids: recs.map(x => x.id) };
 }
 
-// Sends a template (or custom) email to one or more learners and logs a conversation per person.
+/* ----- templates: defaults + versions saved in Settings ----- */
+function templateFor_(key, lang) {
+  const def = EMAILS[key];
+  if (!def) throw new Error('invalid_template');
+  const saved = settings_()['tpl:' + key + ':' + lang];
+  let t = null;
+  if (saved) { try { t = JSON.parse(saved); } catch (e) { t = null; } }
+  return { subject: t ? t.subject : def[lang].subject, body: t ? t.body : def[lang].body, cta: t ? (t.cta || '') : def[lang].cta,
+    custom: !!t, pending: !t && !!def.pending };
+}
+function templatesAll_() {
+  const out = {};
+  Object.keys(EMAILS).forEach(k => {
+    const d = EMAILS[k];
+    out[k] = { label: d.label, to: d.to, vars: d.vars, category: d.category, en: templateFor_(k, 'en'), es: templateFor_(k, 'es') };
+    out[k].pending = out[k].en.pending || out[k].es.pending;
+  });
+  return out;
+}
+function templateSave_(b) {
+  const key = String(b.key || ''), lang = b.lang === 'es' ? 'es' : 'en';
+  if (!EMAILS[key] || key === 'custom') throw new Error('invalid_template');
+  if (b.reset) { rewrite_('Settings', rows_('Settings').filter(x => x.key !== 'tpl:' + key + ':' + lang)); return { ok: true, templates: templatesAll_() }; }
+  const t = { subject: clean_(b.subject, 300), body: String(b.body == null ? '' : b.body).slice(0, 8000), cta: clean_(b.cta, 80) };
+  if (!t.subject || !t.body.trim()) throw new Error('invalid_email_text');
+  upsert_('Settings', [{ key: 'tpl:' + key + ':' + lang, value: JSON.stringify(t) }]);
+  return { ok: true, templates: templatesAll_() };
+}
+// Sample values for a test email
+function sampleVars_(key, lang, user) {
+  const es = lang === 'es';
+  return { first: (user.name || 'Test').split(' ')[0], cohort: es ? 'Cohort 1 SPA' : 'Cohort 7', link: CONFIG.LEARNER_URL, module: es ? 'Fundamentos de CAPI' : 'Foundations of CAPI',
+    code: 'ABCD123', sme: (user.name || 'Test').split(' ')[0], course: 'Foundations of CAPI for Decision Implementation', startDate: es ? 'lunes 4 de enero de 2027' : 'Monday, January 4, 2027',
+    sessions: '· Mon 4 Jan 27 · 3.1 Establishing Control Over a Problem\n· Wed 6 Jan 27 · 3.1 Establishing Control Over a Problem',
+    curriculumLink: fill_(CONFIG.TEACHABLE_CURRICULUM_URL, { id: '2930596' }), portalLink: CONFIG.PORTAL_URL };
+}
+function templateTest_(b, user) {
+  const key = String(b.key || ''), lang = b.lang === 'es' ? 'es' : 'en';
+  const t = templateFor_(key, lang);
+  const text = { subject: b.subject != null ? b.subject : t.subject, body: b.body != null ? b.body : t.body, cta: b.cta != null ? b.cta : t.cta };
+  deliver_(user.email, lang, text, sampleVars_(key, lang, user), { test: true });
+  return { ok: true, to: user.email };
+}
+
+// Renders and sends one email. opts: { test, attachments }
+function deliver_(to, lang, text, vars, opts) {
+  opts = opts || {};
+  const v = vars || {};
+  let subject = fill_(text.subject, v), body = fill_(text.body, v);
+  if (!subject || !String(body).trim()) throw new Error('invalid_email_text');
+  if (opts.test) subject = '[TEST] ' + subject;
+  const paras = String(body).split(/\n{2,}/).map(p => '<p style="margin:0 0 14px">' + linkify_(esc_(p)).replace(/\n/g, '<br>') + '</p>').join('');
+  const link = v.link || v.portalLink;
+  const cta = link && text.cta ? '<p style="margin:22px 0"><a href="' + esc_(link) + '" style="display:inline-block;background:#d7141a;color:#ffffff;font:700 15px Arial,sans-serif;text-decoration:none;padding:12px 22px;border-radius:4px">' + esc_(fill_(text.cta, v)) + ' &rarr;</a></p>' : '';
+  const testBar = opts.test ? '<p style="margin:0 0 18px;padding:8px 12px;background:#fff3d6;color:#8a5a00;font:600 12px Arial,sans-serif;border-radius:4px">TEST · ' + (lang === 'es' ? 'así lo recibirá cada persona, con sus propios datos' : 'this is how each person will receive it, with their own details') + '</p>' : '';
+  const html = emailShell_(lang, testBar + paras + cta + '<p style="margin:22px 0 0">' + esc_(EMAIL_SIGN[lang]) + '</p>');
+  sendMail_(to, subject, body + (v.link ? '\n\n' + v.link : '') + '\n\n' + EMAIL_SIGN[lang], html, opts.attachments);
+  return subject;
+}
+function linkify_(html) { return html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" style="color:#d7141a">$1</a>'); }
+
+// Variables of a learner-facing template for one learner
+function learnerVars_(key, cohort, l, b) {
+  const vars = { first: l.firstName || '', cohort: cohort.name };
+  if (key === 'goals') {
+    if (!l.profileToken) update_('Learners', l.email, { profileToken: randomToken_(32) });
+    vars.link = profileUrl_((rows_('Learners').find(x => x.email === l.email)).profileToken);
+  }
+  if (key === 'registration') {
+    if (!cohort.regToken) update_('Cohorts', cohort.id, { regToken: randomToken_(24) });
+    vars.link = regUrl_(rows_('Cohorts').find(x => x.id === cohort.id).regToken, l.email);
+  }
+  if (key === 'moduleFeedback') {
+    const block = rows_('Blocks').find(x => x.id === b.blockId && x.cohortId === cohort.id);
+    if (!block) throw new Error('invalid_block');
+    vars.module = block.title;
+    vars.link = typeformLink_(cohort, block, l);
+    if (!vars.link) throw new Error('invalid_typeform_form');
+  }
+  if (key === 'booksCode') {
+    if (!l.booksCode) throw new Error('invalid_no_books_code');
+    vars.code = l.booksCode;
+  }
+  return vars;
+}
+
+// Sends a template (or custom) email to learners and logs a conversation per person.
+// b.test: sends the first recipient's version to the signed-in user only (nothing is logged).
 function emailSend_(b, user) {
   const cohort = rows_('Cohorts').find(c => c.id === b.cohortId);
   if (!cohort) throw new Error('not_found');
-  const key = EMAILS[b.template] ? b.template : 'custom';
-  if (EMAILS[key].pending && !b.allowPending) throw new Error('invalid_template_pending');
+  const key = EMAILS[b.template] && EMAILS[b.template].to === 'learner' ? b.template : 'custom';
+  const lang = cohort.language === 'es' ? 'es' : 'en';
+  const t = templateFor_(key, lang);
+  const custom = b.subject != null && String(b.subject).trim() && b.body != null && String(b.body).trim();
+  if (t.pending && !custom) throw new Error('invalid_template_pending');
+  const text = custom ? { subject: String(b.subject), body: String(b.body), cta: t.cta } : t;
   const emails = (b.emails || []).map(normEmail_).filter(Boolean);
   if (!emails.length) throw new Error('invalid_email');
+  if (b.test) {
+    const l = rows_('Learners').find(x => x.email === emails[0]);
+    if (!l) throw new Error('not_found');
+    deliver_(user.email, lang, text, learnerVars_(key, cohort, l, b), { test: true });
+    return { ok: true, test: true, to: user.email, sent: [], failed: [] };
+  }
   const sent = [], failed = [];
   emails.forEach(email => {
     const l = rows_('Learners').find(x => x.email === email);
     if (!l) { failed.push({ email: email, error: 'not_found' }); return; }
     try {
-      const vars = {};
-      if (key === 'profile') {
-        if (!l.profileToken) update_('Learners', email, { profileToken: randomToken_(32) });
-        vars.link = profileUrl_((rows_('Learners').find(x => x.email === email)).profileToken);
-      }
-      if (key === 'moduleFeedback') {
-        const block = rows_('Blocks').find(x => x.id === b.blockId && x.cohortId === cohort.id);
-        if (!block) throw new Error('invalid_block');
-        vars.module = block.title;
-        vars.link = typeformLink_(cohort, block, l);
-        if (!vars.link) throw new Error('invalid_typeform_form');
-      }
-      sendTemplate_(key, cohort, l, vars, user, { subject: b.subject, body: b.body });
+      const subject = deliver_(l.email, lang, text, learnerVars_(key, cohort, l, b));
+      logEmail_(cohort.id, l.email, subject, EMAILS[key].category, user);
       sent.push(email);
     } catch (e) { failed.push({ email: email, error: String(e.message || e) }); }
   });
   return { ok: true, sent: sent, failed: failed };
 }
-
+function logEmail_(cohortId, email, subject, category, user) {
+  const now = new Date().toISOString();
+  insert_('Conversations', [{ id: newId_('V'), cohortId: cohortId, email: email, date: today_(), withName: user ? (user.name || user.email) : 'System',
+    initiatedBy: 'Adizes', via: ['Email'], categories: [category], description: subject, status: 'Completed',
+    emailSubject: subject, emailSentAt: now, createdBy: user ? user.email : 'system', createdAt: now }]);
+}
+// Kept for older callers
 function sendTemplate_(key, cohort, learner, vars, user, custom) {
   const lang = cohort.language === 'es' ? 'es' : 'en';
-  const tpl = EMAILS[key][lang];
-  const v = Object.assign({ first: learner.firstName || '', cohort: cohort.name }, vars || {});
-  const subject = fill_((custom && custom.subject) || tpl.subject, v);
-  const body = fill_((custom && custom.body) || tpl.body, v);
-  if (!subject || !body) throw new Error('invalid_email_text');
-  const paras = body.split(/\n{2,}/).map(p => '<p style="margin:0 0 14px">' + esc_(p).replace(/\n/g, '<br>') + '</p>').join('');
-  const cta = v.link && tpl.cta ? '<p style="margin:22px 0"><a href="' + esc_(v.link) + '" style="display:inline-block;background:#d7141a;color:#ffffff;font:700 15px Arial,sans-serif;text-decoration:none;padding:12px 22px;border-radius:4px">' + esc_(tpl.cta) + ' &rarr;</a></p>' : '';
-  const html = emailShell_(lang, paras + cta + '<p style="margin:22px 0 0">' + esc_(EMAIL_SIGN[lang]) + '</p>');
-  sendMail_(learner.email, subject, body + (v.link ? '\n\n' + v.link : '') + '\n\n' + EMAIL_SIGN[lang], html);
-  const now = new Date().toISOString();
-  insert_('Conversations', [{ id: newId_('V'), cohortId: cohort.id, email: learner.email, date: today_(), withName: user ? (user.name || user.email) : 'System',
-    initiatedBy: 'Adizes', via: ['Email'], categories: [EMAILS[key].category], description: subject, status: 'Completed',
-    emailSubject: subject, emailSentAt: now, createdBy: user ? user.email : 'system', createdAt: now }]);
+  const t = templateFor_(key, lang);
+  const text = custom && custom.subject && custom.body ? { subject: custom.subject, body: custom.body, cta: t.cta } : t;
+  const subject = deliver_(learner.email, lang, text, Object.assign({ first: learner.firstName || '', cohort: cohort.name }, vars || {}));
+  logEmail_(cohort.id, learner.email, subject, EMAILS[key].category, user);
+}
+
+/* ----- progress report (PDF made in the browser) ----- */
+function reportSend_(b, user) {
+  const cohort = rows_('Cohorts').find(c => c.id === b.cohortId);
+  if (!cohort) throw new Error('not_found');
+  const l = rows_('Learners').find(x => x.email === normEmail_(b.email));
+  if (!l) throw new Error('not_found');
+  const b64 = String(b.pdfBase64 || '');
+  if (b64.length < 100 || b64.length > 8e6) throw new Error('invalid_pdf');
+  const lang = cohort.language === 'es' ? 'es' : 'en';
+  const t = templateFor_('progressReport', lang);
+  const text = { subject: String(b.subject || '').trim() ? String(b.subject) : t.subject, body: String(b.body || '').trim() ? String(b.body) : t.body, cta: '' };
+  const name = clean_(b.filename, 120).replace(/[^\w .-]/g, '') || 'Progress report.pdf';
+  const blob = Utilities.newBlob(Utilities.base64Decode(b64), 'application/pdf', name);
+  const vars = { first: l.firstName || '', cohort: cohort.name };
+  if (b.test) { deliver_(user.email, lang, text, vars, { test: true, attachments: [blob] }); return { ok: true, test: true, to: user.email }; }
+  const subject = deliver_(l.email, lang, text, vars, { attachments: [blob] });
+  logEmail_(cohort.id, l.email, subject, 'Other', user);
+  return { ok: true, to: l.email };
+}
+
+/* ----- SME reminders: one week before the first session of their block ----- */
+function smeReminderVars_(cohort, block) {
+  const lang = cohort.language === 'es' ? 'es' : 'en';
+  const ss = rows_('Sessions').filter(s => s.blockId === block.id && s.date).sort((a, b) => a.date.localeCompare(b.date));
+  const u = findUser_(block.smeEmail) || {};
+  return {
+    sme: String(u.name || block.smeName || '').split(' ')[0], course: block.title, cohort: cohort.name,
+    startDate: ss[0] ? longDate_(ss[0].date, lang) : '—',
+    sessions: ss.map(s => '· ' + longDate_(s.date, lang) + (s.moduleNo ? ' · ' + s.moduleNo : '') + (s.moduleTitle ? ' ' + s.moduleTitle : '')).join('\n'),
+    curriculumLink: block.teachableCourseId ? fill_(CONFIG.TEACHABLE_CURRICULUM_URL, { id: block.teachableCourseId }) : (lang === 'es' ? '(sin curso de Teachable ligado)' : '(no Teachable course linked)'),
+    portalLink: CONFIG.PORTAL_URL + '#/c/' + cohort.id + '/overview',
+  };
+}
+function sendSmeReminder_(cohort, block, user, opts) {
+  opts = opts || {};
+  const lang = cohort.language === 'es' ? 'es' : 'en';
+  const t = templateFor_('smeReminder', lang);
+  if (t.pending && !opts.test) throw new Error('invalid_template_pending');
+  const to = opts.test ? user.email : block.smeEmail;
+  if (!to) throw new Error('invalid_no_sme_email');
+  deliver_(to, lang, t, smeReminderVars_(cohort, block), { test: !!opts.test });
+  if (!opts.test) update_('Blocks', block.id, { reminderSentAt: new Date().toISOString() });
+}
+function smeRemind_(b, user) {
+  const block = rows_('Blocks').find(x => x.id === b.blockId);
+  if (!block) throw new Error('not_found');
+  const cohort = rows_('Cohorts').find(c => c.id === block.cohortId);
+  sendSmeReminder_(cohort, block, user, { test: !!b.test });
+  return { ok: true, to: b.test ? user.email : block.smeEmail };
+}
+// Daily: blocks starting in 1..7 days without a reminder yet (catches up if a run was missed)
+function smeRemindersDue_() {
+  const t = today_(), limit = addDays_(t, CONFIG.SME_REMINDER_DAYS);
+  const sent = [];
+  rows_('Cohorts').filter(c => c.status !== 'Completed').forEach(c => {
+    if (templateFor_('smeReminder', c.language === 'es' ? 'es' : 'en').pending) return;
+    rows_('Blocks').filter(x => x.cohortId === c.id && x.smeEmail && !x.reminderSentAt).forEach(x => {
+      const first = rows_('Sessions').filter(s => s.blockId === x.id && s.date).map(s => s.date).sort()[0];
+      if (!first || first <= t || first > limit) return;
+      try { sendSmeReminder_(c, x, { email: 'system', name: 'System' }); sent.push(x.id); } catch (e) { console.error('reminder', c.name, x.title, e); }
+    });
+  });
+  return sent;
+}
+function addDays_(iso, n) { const d = new Date(iso + 'T12:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function longDate_(iso, lang) {
+  const d = new Date(iso + 'T12:00:00Z');
+  const M = lang === 'es' ? ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'] : ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const W = lang === 'es' ? ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'] : ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  return lang === 'es' ? W[d.getUTCDay()] + ' ' + d.getUTCDate() + ' de ' + M[d.getUTCMonth()] + ' de ' + d.getUTCFullYear()
+    : W[d.getUTCDay()] + ', ' + M[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
 }
 
 function emailShell_(lang, inner, staff) {
@@ -992,13 +1265,75 @@ function emailShell_(lang, inner, staff) {
     '<tr><td style="background:#111111;padding:22px 32px;border-bottom:4px solid #d7141a"><img src="' + CONFIG.ASSETS_BASE + 'adizes-logo-white.png" alt="Adizes Institute" width="130" style="display:block;width:130px;height:auto"></td></tr>' +
     '<tr><td style="padding:30px 32px;font:15px/1.6 Arial,sans-serif;color:#1a1a1a">' + inner + '</td></tr>' +
     '<tr><td style="padding:14px 32px;background:#f4f4f4;font:12px/1.5 Arial,sans-serif;color:#777">' +
-    (staff ? esc_(CONFIG.APP_NAME) : (lang === 'es' ? 'Adizes Institute · Adizes Executive Program' : 'Adizes Institute · Adizes Executive Program')) + '</td></tr></table></div>';
+    (staff ? esc_(CONFIG.APP_NAME) : 'Adizes Institute · Adizes Executive Program') + '</td></tr></table></div>';
 }
 
-function sendMail_(to, subject, plain, html) {
+// Every email leaves from CONFIG.EMAIL.FROM_ADDRESS: either the script runs as that account,
+// or that address is a "Send mail as" alias of the account that runs it. Otherwise nothing is sent.
+function senderStatus_() {
+  const cache = CacheService.getScriptCache();
+  const hit = cache.get('sender_status');
+  if (hit) return JSON.parse(hit);
+  const runsAs = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+  const from = String(CONFIG.EMAIL.FROM_ADDRESS || '').toLowerCase();
+  let mode = 'self';
+  if (from && from !== runsAs) {
+    let aliases = [];
+    try { aliases = GmailApp.getAliases().map(a => String(a).toLowerCase()); } catch (e) { aliases = []; }
+    mode = aliases.indexOf(from) >= 0 ? 'alias' : 'wrong';
+  }
+  const st = { runsAs: runsAs, from: from || runsAs, ok: mode !== 'wrong', mode: mode };
+  cache.put('sender_status', JSON.stringify(st), 3600);
+  return st;
+}
+function sendMail_(to, subject, plain, html, attachments) {
+  const st = senderStatus_();
+  if (!st.ok) throw new Error('invalid_sender');
   const options = { name: CONFIG.EMAIL.FROM_NAME, htmlBody: html };
-  if (CONFIG.EMAIL.FROM_ADDRESS) options.from = CONFIG.EMAIL.FROM_ADDRESS;
+  if (st.mode === 'alias') options.from = st.from;
+  if (attachments && attachments.length) options.attachments = attachments;
   GmailApp.sendEmail(to, subject, plain, options);
+}
+
+/* =================================================================================
+ *  PLANNER — general calendar (everyone), drafts (PM) and SME time off
+ * ================================================================================= */
+function plannerGet_(b, user) {
+  const pm = user.role === 'PM';
+  const cohorts = rows_('Cohorts').map(c => pick_(c, ['id', 'name', 'code', 'language', 'status', 'startDate']));
+  const blocks = rows_('Blocks').map(x => pick_(x, ['id', 'cohortId', 'order', 'kind', 'number', 'title', 'smeEmail', 'smeName']));
+  const sessions = rows_('Sessions').filter(s => s.date).map(s => ({ c: s.cohortId, b: s.blockId, d: s.date, no: s.moduleNo, t: s.moduleTitle, se: s.smeEmail, sn: s.smeName }));
+  return { ok: true, cohorts: cohorts, blocks: blocks, sessions: sessions, smes: smeDirectory_(), today: today_(),
+    unavailability: rows_('Unavailability').map(strip_),
+    drafts: pm ? rows_('Drafts').map(strip_) : [] };
+}
+function draftSave_(b, user) {
+  const d = b.draft || {};
+  const now = new Date().toISOString();
+  const rec = { id: /^D[A-Z0-9]{6,}$/.test(String(d.id || '')) ? d.id : newId_('D'), name: clean_(d.name, 120) || 'Draft', data: d.data || {}, updatedAt: now };
+  if (JSON.stringify(rec.data).length > 45000) throw new Error('invalid_draft_too_big');
+  const old = rows_('Drafts').find(x => x.id === rec.id);
+  if (old) update_('Drafts', rec.id, rec);
+  else insert_('Drafts', [Object.assign(rec, { createdBy: user.email, createdAt: now })]);
+  return { ok: true, id: rec.id };
+}
+function unavailSave_(b, user) {
+  const r = b.record || {};
+  const smeKey = user.role === 'SME' ? user.email : clean_(r.smeKey, 160);
+  if (!smeKey) throw new Error('invalid_sme');
+  const from = cleanDate_(r.from), to = cleanDate_(r.to) || cleanDate_(r.from);
+  if (!from || to < from) throw new Error('invalid_dates');
+  const rec = { id: r.id || newId_('U'), smeKey: smeKey, from: from, to: to, note: clean_(r.note, 200), createdBy: user.email, createdAt: new Date().toISOString() };
+  const old = rows_('Unavailability').find(x => x.id === rec.id);
+  if (old && user.role === 'SME' && old.smeKey !== user.email) throw new Error('forbidden');
+  upsert_('Unavailability', [rec]);
+  return { ok: true, id: rec.id };
+}
+function unavailDelete_(b, user) {
+  const old = rows_('Unavailability').find(x => x.id === b.id);
+  if (!old) throw new Error('not_found');
+  if (user.role === 'SME' && old.smeKey !== user.email) throw new Error('forbidden');
+  return deleteById_('Unavailability', b.id);
 }
 
 /* =================================================================================
@@ -1344,11 +1679,11 @@ function importCohort_(b, user) {
   const now = new Date().toISOString();
   const cohort = { id: newId_('C'), name: clean_(c.name, 80), code: clean_(c.code, 40), language: c.language === 'es' ? 'es' : 'en', startDate: cleanDate_(c.startDate),
     status: OPTIONS.cohortStatus.indexOf(c.status) >= 0 ? c.status : 'Active', teachableBundleId: clean_(c.teachableBundleId, 20), createdAt: now, updatedAt: now,
-    notes: 'Imported from ' + clean_(d.source, 120) + ' on ' + today_() };
+    notes: 'Imported from ' + clean_(d.source, 120) + ' on ' + today_(), regToken: randomToken_(24) };
   insert_('Cohorts', [cohort]);
   const bk = {}, sk = {};
   const blocks = (d.blocks || []).map((x, i) => { const id = newId_('B'); bk[x.key] = id; return { id: id, cohortId: cohort.id, order: i + 1, kind: x.kind, number: clean_(x.number, 10),
-    title: clean_(x.title, 200), smeName: clean_(x.smeName, 80), smeEmail: '', smeSeesFeedback: false, teachableCourseId: clean_(x.teachableCourseId, 20) }; });
+    title: clean_(x.title, 200), smeName: clean_(x.smeName, 80), smeEmail: '', smeSeesFeedback: true, teachableCourseId: clean_(x.teachableCourseId, 20) }; });
   const sessions = (d.sessions || []).map((x, i) => { const id = newId_('S'); sk[x.key] = id; return { id: id, cohortId: cohort.id, blockId: bk[x.blockKey], order: i + 1,
     date: cleanDate_(x.date), moduleNo: clean_(x.moduleNo, 12), moduleTitle: clean_(x.moduleTitle, 200), smeName: '', smeEmail: '',
     defreeze: clean_(x.defreeze, 1000), recordingUrl: clean_(x.recordingUrl, 1000), notes: clean_(x.notes, 1000) }; });
@@ -1478,6 +1813,8 @@ function dailyJobs() {
     MEMO_ = {};
   });
   try { if (PropertiesService.getScriptProperties().getProperty('TYPEFORM_TOKEN')) withLock_(() => typeformSync_(system)); } catch (e) { console.error('typeform', e); }
+  MEMO_ = {};
+  try { withLock_(() => smeRemindersDue_()); } catch (e) { console.error('sme reminders', e); }
   // housekeeping: expired auth sessions
   MEMO_ = {};
   withLock_(() => { const keep = rows_('AuthSessions').filter(s => s.expiresAt > new Date().toISOString()); if (keep.length !== rows_('AuthSessions').length) rewrite_('AuthSessions', keep); });
@@ -1488,6 +1825,7 @@ function dailyJobs() {
  *  DATA MIGRATIONS — run automatically (sign-in bootstrap, nightly job, setup)
  *  v2: "Enrolled Inactive" → "Low Activity"; Dropped / Moved / Asynchronous get the date
  *      their status applies from (last session attended, or the cohort start).
+ *  v3: SMEs see their feedback by default; registration link token per cohort.
  * ================================================================================= */
 function migrate_() {
   if (Number(settings_().schemaVersion || 1) >= SCHEMA_VERSION) return;
@@ -1500,8 +1838,9 @@ function migrate_() {
       const x = sess[a.sessionId]; if (a.status !== 'Present' || !x || !x.date) return;
       const k = a.cohortId + '|' + a.email; if (!lastPresent[k] || x.date > lastPresent[k]) lastPresent[k] = x.date;
     });
+    const version = Number(settings_().schemaVersion || 1);
     let changed = false;
-    const out = rows_('Enrollments').map(e => {
+    const out = version >= 2 ? rows_('Enrollments') : rows_('Enrollments').map(e => {
       let o = e;
       if (o.status === 'Enrolled Inactive') { o = Object.assign({}, o, { status: 'Low Activity' }); changed = true; }
       if (NO_LIVE_STATUSES.indexOf(o.status) >= 0 && !o.statusDate) {
@@ -1510,6 +1849,12 @@ function migrate_() {
       return o;
     });
     if (changed) rewrite_('Enrollments', out);
+    if (version < 3) {
+      // v3: SMEs see their feedback by default; every cohort gets a registration link
+      const bl = rows_('Blocks');
+      if (bl.some(x => !x.smeSeesFeedback)) rewrite_('Blocks', bl.map(x => Object.assign({}, x, { smeSeesFeedback: true })));
+      rows_('Cohorts').filter(c => !c.regToken).forEach(c => update_('Cohorts', c.id, { regToken: randomToken_(24) }));
+    }
     upsert_('Settings', [{ key: 'schemaVersion', value: String(SCHEMA_VERSION) }]);
   });
 }
@@ -1689,6 +2034,7 @@ function setup() {
   MEMO_ = {};
   Object.keys(SCHEMA).forEach(t => table_(t));
   migrate_();
+  CacheService.getScriptCache().remove('sender_status');
   const me = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
   const pms = CONFIG.INITIAL_PMS.concat(me && CONFIG.ALLOWED_DOMAINS.some(d => me.endsWith('@' + d)) ? [me] : []);
   pms.forEach(email => {
@@ -1699,7 +2045,9 @@ function setup() {
   // Touch the services once so Google asks for every permission now
   GmailApp.getAliases();
   CacheService.getScriptCache().get('x');
-  Logger.log('Ready. Tables created; Program Managers: ' + pms.join(', ') + '. Daily sync scheduled at 5 am.');
+  const st = senderStatus_();
+  Logger.log('Ready. Tables created; Program Managers: ' + pms.join(', ') + '. Daily sync scheduled at 5 am. ' +
+    (st.ok ? 'Emails leave from ' + st.from + '.' : 'WARNING: emails cannot leave from ' + st.from + ' — this script runs as ' + st.runsAs + '. Deploy it with that account or add the alias.'));
 }
 
 /* =================================================================================

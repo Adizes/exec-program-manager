@@ -88,6 +88,8 @@ export function loadGas(opts = {}) {
         return p; // yyyy-MM-dd
       },
       sleep: () => {},
+      base64Decode: (b) => Array.from(Buffer.from(String(b), 'base64')),
+      newBlob: (bytes, type, name) => ({ bytes, type, name, getName: () => name, getContentType: () => type }),
     },
     Session: {
       getScriptTimeZone: () => state.tz,

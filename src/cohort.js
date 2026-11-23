@@ -75,7 +75,7 @@ function tabOverview(el, ctx) {
     xShort: function (lab) { return lab.split(' · ')[0]; },
     series: [
       { name: 'Still in the program', values: held.map(function (s) { return M.sessionRate[s.id].activeRate * 100; }) },
-      { name: 'Attended the session', values: held.map(function (s) { return M.sessionRate[s.id].rate * 100; }) }],
+      { name: 'Attended the session', values: held.map(function (s) { return M.sessionRate[s.id].launchRate * 100; }) }],
     yMin: 0, yMax: 100, yFmt: function (v) { return Math.round(v) + '%'; },
   }), h('p.epm-small.epm-muted', 'Both lines are a share of the ' + M.launch + ' learners enrolled at launch (plus anyone moved in later, from the date they joined). The gap between the lines is people still enrolled who did not attend.')));
   // ratings by block
@@ -94,6 +94,7 @@ function tabLearners(el, ctx) {
     selectEl([{ value: 'counted', label: 'Active in this cohort' }, { value: 'all', label: 'Everyone (incl. dropped / moved)' }], filter, { onchange: function () { filter = this.value; draw(); }, 'aria-label': 'Filter' }),
     h('.epm-spacer'),
     pm ? btn('Send email', { icon: 'mail', kind: 'ghost' }, function () { emailComposer(ctx, []); }) : null,
+    pm ? btn('Registration form', { icon: 'link', kind: 'ghost' }, function () { registrationModal(ctx); }) : null,
     pm ? btn('Add learners', { icon: 'plus', kind: 'primary' }, function () { addLearnersModal(ctx); }) : null);
   var wrap = h('div');
   append(el, [bar, wrap]);
@@ -101,7 +102,7 @@ function tabLearners(el, ctx) {
     clear(wrap);
     var list = filter === 'all' ? M.enrollments : M.counted;
     if (!list.length) { wrap.appendChild(empty('No learners yet.', pm ? btn('Add learners', { icon: 'plus', kind: 'primary' }, function () { addLearnersModal(ctx); }) : null)); return; }
-    var heads = ['Learner', 'Status', 'Attendance', 'LMS', 'Session ★', 'Module ★'].concat(pm ? ['Conv.', 'Profile', 'Kit', 'Books', 'Cert.'] : []).concat(['P', 'A', 'E', 'I', 'Lifecycle']);
+    var heads = ['Learner', 'Status', 'Attendance', 'LMS', 'Session ★', 'Module ★'].concat(pm ? ['Conv.', 'Registered', 'Kit', 'Books', 'Cert.'] : []).concat(['P', 'A', 'E', 'I', 'Lifecycle']);
     wrap.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-click', h('thead', h('tr', heads.map(function (x, i) { return h('th', { class: i > 1 ? 'num' : '' }, x); }))),
       h('tbody', list.map(function (e) {
         var l = M.learner[e.email] || { email: e.email }, s = M.stats[e.email];
@@ -110,7 +111,7 @@ function tabLearners(el, ctx) {
           h('td', statusBadge(e.status, e)),
           h('td.num', pctCell(s.att)), h('td.num', pctCell(s.lms)),
           h('td.num', s.exp == null ? '—' : num(s.exp)), h('td.num', s.mod == null ? '—' : num(s.mod)),
-          pm ? [h('td.num', String(s.convs)), h('td.num', l.profileSubmittedAt ? badge('Done', 'good') : badge('—', 'muted')), h('td.num', l.welcomeKit || '—'), h('td.num', l.booksCode || '—'), h('td.num', e.certificationSent || '—')] : null,
+          pm ? [h('td.num', String(s.convs)), h('td.num', l.profileSubmittedAt ? badge('Yes', 'good') : badge('—', 'muted')), h('td.num', l.welcomeKit || '—'), h('td.num', l.booksCode || '—'), h('td.num', e.certificationSent || '—')] : null,
           ['P', 'A', 'E', 'I'].map(function (k) { return h('td.num', l[k] == null ? '—' : String(l[k])); }),
           h('td.num', l.lifecycle || '—'));
       })))));
@@ -121,30 +122,20 @@ function tabLearners(el, ctx) {
 
 function addLearnersModal(ctx) {
   var rows = h('.epm-rows');
-  var addRow = function (v) {
-    v = v || {};
-    var r = h('.epm-row3', inputEl(v.email, { placeholder: 'email@company.com', type: 'email', 'aria-label': 'Email' }), inputEl(v.firstName, { placeholder: 'First name', 'aria-label': 'First name' }), inputEl(v.lastName, { placeholder: 'Last name', 'aria-label': 'Last name' }),
+  var addRow = function () {
+    var r = h('.epm-row3', inputEl('', { placeholder: 'email@company.com', type: 'email', 'aria-label': 'Email' }), inputEl('', { placeholder: 'First name', 'aria-label': 'First name' }), inputEl('', { placeholder: 'Last name', 'aria-label': 'Last name' }),
       btn('', { icon: 'close', kind: 'ghost', aria: 'Remove row' }, function () { r.remove(); }));
     rows.appendChild(r);
   };
   addRow();
-  var paste = textareaEl('', { rows: 3, placeholder: 'Or paste rows from a spreadsheet: email, first name, last name (one person per line)' });
-  paste.addEventListener('change', function () {
-    paste.value.split(/\n/).map(function (l) { return l.split(/\t|,|;/).map(function (x) { return x.trim(); }); }).filter(function (p) { return p[0] && p[0].indexOf('@') > 0; })
-      .forEach(function (p) { addRow({ email: p[0], firstName: p[1], lastName: p[2] }); });
-    Array.prototype.slice.call(rows.children).forEach(function (r) { if (!r.children[0].value) r.remove(); });
-    paste.value = '';
-  });
-  var send = h('input', { type: 'checkbox', checked: true });
   var m = modal('Add learners to ' + ctx.C.cohort.name, [
-    h('p.epm-p', 'Each learner gets a personal link to complete their profile and goals. The email is sent in the cohort language (' + (ctx.C.cohort.language === 'es' ? 'Spanish' : 'English') + ').'),
-    rows, btn('Add another', { icon: 'plus', kind: 'ghost' }, function () { addRow(); }), paste,
-    h('label.epm-check', send, h('span', 'Send the profile link now'))], {
+    h('p.epm-p', 'Enrolls them in this cohort. No email is sent: share the registration form or the Goals & intentions link whenever you want.'),
+    rows, btn('Add another', { icon: 'plus', kind: 'ghost' }, function () { addRow(); })], {
     wide: true,
     footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Add learners', { kind: 'primary' }, function () {
       var people = Array.prototype.slice.call(rows.children).map(function (r) { return { email: r.children[0].value.trim(), firstName: r.children[1].value.trim(), lastName: r.children[2].value.trim() }; }).filter(function (p) { return p.email; });
       if (!people.length) return toast('Add at least one email', 'error');
-      api('learner.add', { cohortId: ctx.id, people: people, sendProfileLink: send.checked }).then(function (res) {
+      api('learner.add', { cohortId: ctx.id, people: people }).then(function (res) {
         m.close();
         toast(res.added.length + ' added' + (res.skipped.length ? ' · ' + res.skipped.length + ' skipped (' + res.skipped.map(function (s) { return s.email + ': ' + s.reason.replace(/_/g, ' '); }).join(', ') + ')' : ''), res.skipped.length ? 'error' : null);
         ctx.reload();
@@ -163,7 +154,8 @@ function tabCalendar(el, ctx) {
     var ss = M.blockSessions[b.id] || [];
     var card = h('.epm-card.epm-block');
     card.appendChild(h('.epm-block-head', h('div', h('span.epm-block-no', b.kind === 'course' ? b.number : (b.kind === 'case_study' ? b.number : '')), h('b', b.title)),
-      h('span.epm-muted', smeLabel(b) ? 'SME: ' + smeLabel(b) : '')));
+      h('.epm-block-meta', h('span.epm-muted', smeLabel(b) ? 'SME: ' + smeLabel(b) : ''),
+        pm && (b.smeEmail || b.smeName) && ss.length ? btn(b.reminderSentAt ? 'Reminded' : 'Remind SME', { icon: b.reminderSentAt ? 'check' : 'mail', kind: 'ghost', title: b.reminderSentAt ? 'Reminder sent ' + fmtDateTime(b.reminderSentAt) : 'Email the SME one week before the course (automatic)' }, function () { smeReminderModal(ctx, b); }) : null)));
     var tb = h('tbody');
     ss.forEach(function (s) {
       if (prev && s.date && prev.date && (pd(s.date) - pd(prev.date)) / 864e5 > 10) tb.appendChild(h('tr.epm-break', h('td', { colspan: '5' }, 'Break · ' + Math.round((pd(s.date) - pd(prev.date)) / 864e5 / 7 - 1) + ' week(s) without sessions')));
@@ -175,10 +167,10 @@ function tabCalendar(el, ctx) {
         h('td', h('b', s.moduleNo || ''), ' ', s.moduleTitle || '', s.smeEmail || s.smeName ? h('div.epm-small.epm-muted', 'SME: ' + smeLabel(s)) : null),
         h('td.epm-small', s.defreeze ? h('span.epm-defreeze', { title: 'Defreeze question' }, icon('chat', 14), h('span', s.defreeze)) : (done && pm ? h('span.epm-muted', 'No defreeze yet') : '')),
         h('td.epm-nowrap', recs.length ? recs.map(function (u, i) { return h('a.epm-link.epm-rec', { href: u, target: '_blank', rel: 'noopener', onclick: function (e) { e.stopPropagation(); } }, icon('play', 14), recs.length > 1 ? 'Rec ' + (i + 1) : 'Recording'); }) : (done ? h('span.epm-muted.epm-small', 'No recording') : '')),
-        h('td.num', rate ? h('span', { title: rate.p + ' of ' + rate.base + ' enrolled learners attended' }, pctCell(rate.rate)) : '')));
+        h('td.num', rate ? h('span', { title: rate.p + ' of ' + rate.base + ' current learners attended' }, pctCell(rate.rate)) : '')));
     });
     card.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-sm.epm-cal', h('colgroup', h('col', { style: { width: '120px' } }), h('col', { style: { width: '36%' } }), h('col'), h('col', { style: { width: '170px' } }), h('col', { style: { width: '96px' } })),
-      h('thead', h('tr', h('th', 'Date'), h('th', 'Module'), h('th', 'Defreeze'), h('th', 'Recording'), h('th.num', { title: 'Learners who attended, out of everyone enrolled at that date' }, 'Attendance'))), tb)));
+      h('thead', h('tr', h('th', 'Date'), h('th', 'Module'), h('th', 'Defreeze'), h('th', 'Recording'), h('th.num', { title: 'Learners who attended, out of the learners expected that day (people who dropped out or moved count only for the sessions before they left)' }, 'Attendance'))), tb)));
     el.appendChild(card);
   });
 }
@@ -266,7 +258,7 @@ function tabAttendance(el, ctx) {
           return cell;
         }));
     }));
-    var foot = h('tfoot', h('tr', h('td.epm-sticky', { title: 'Per session: learners who attended out of everyone enrolled at that date' }, 'Attended'), h('td.num', pctCell(M.kpi.attendance)),
+    var foot = h('tfoot', h('tr', h('td.epm-sticky', { title: 'Per session: learners who attended, out of the learners expected that day. People who dropped out or moved count only for the sessions before they left; the overall % only includes people still in the program.' }, 'Attended'), h('td.num', pctCell(M.kpi.attendance)),
       sessions.map(function (s) { var r = M.sessionRate[s.id]; return h('td.num.epm-small', { class: gstart[s.id] ? 'epm-gstart' : '', title: r ? r.p + ' of ' + r.base : '' }, r ? Math.round(r.rate * 100) + '%' : ''); })));
     wrap.appendChild(h('.epm-table-wrap.epm-att-wrap', h('table.epm-table.epm-att-table', thead, tbody, foot)));
   }
@@ -376,7 +368,7 @@ function tabLms(el, ctx) {
       }).catch(fail);
     }) : null));
   if (!M.lmsBlocks.length) { el.appendChild(empty('No Teachable course IDs in this cohort yet.', pm ? btn('Add them in Settings → Structure', {}, function () { go('c/' + ctx.id + '/settings'); }) : null)); return; }
-  el.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-click', h('thead', h('tr', h('th.epm-sticky', 'Learner'), h('th.num', 'Overall'), M.lmsBlocks.map(function (b) { return h('th.num', { title: b.title }, b.kind === 'welcome' ? 'W' : b.number); }))),
+  el.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-click', h('thead', h('tr', h('th.epm-sticky', 'Learner'), h('th.num', 'Overall'), M.lmsBlocks.map(function (b) { return h('th.num.epm-lms-h', { title: blockLabel(b) }, h('span', b.kind === 'welcome' ? 'Welcome' : b.number + '. ' + b.title)); }))),
     h('tbody', M.counted.map(function (e) {
       var lm = M.lms[e.email] || {};
       return h('tr', { tabindex: '0', onclick: function () { lmsDetailModal(ctx, e.email); }, onkeydown: function (ev) { if (ev.key === 'Enter') lmsDetailModal(ctx, e.email); } },
@@ -426,7 +418,9 @@ function tabFeedback(el, ctx) {
 
 function feedbackWeekly(el, ctx) {
   var M = ctx.M, C = ctx.C, pm = isPM();
-  if (pm) el.appendChild(h('.epm-toolbar', h('p.epm-muted', 'Ratings from the end-of-session survey (1–5).'), h('.epm-spacer'), btn('Capture feedback', { icon: 'plus', kind: 'primary' }, function () { weeklyEntryModal(ctx); })));
+  if (pm) el.appendChild(h('.epm-toolbar', h('p.epm-muted', 'Ratings from the end-of-session survey (1–5).'), h('.epm-spacer'),
+    btn('Import CSV', { icon: 'upload', kind: 'ghost', title: 'Replace all the session feedback with the Weekly Feedback sheet' }, function () { weeklyCsvModal(ctx); }),
+    btn('Capture feedback', { icon: 'plus', kind: 'primary' }, function () { weeklyEntryModal(ctx); })));
   var list = (C.weeklyFeedback || []).slice().sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
   if (!list.length) { el.appendChild(empty('No session feedback yet.')); return; }
   // by SME
@@ -528,7 +522,8 @@ function moduleLinksModal(ctx, b, answered) {
         h('td.epm-nowrap', btn('Copy link', { icon: 'copy', kind: 'ghost' }, function () { copyText(u); })));
     }))))], {
     wide: true,
-    footer: [btn('Close', { kind: 'ghost' }, function () { m.close(); }), btn('Email the ' + pendingEmails.length + ' pending', { icon: 'mail', kind: 'primary', disabled: !pendingEmails.length }, function () {
+    footer: [pendingEmails.length ? testBtn(function () { return api('email.send', { cohortId: ctx.id, template: 'moduleFeedback', blockId: b.id, emails: pendingEmails.slice(0, 1), test: true }); }) : null,
+      h('.epm-spacer'), btn('Close', { kind: 'ghost' }, function () { m.close(); }), btn('Email the ' + pendingEmails.length + ' pending', { icon: 'mail', kind: 'primary', disabled: !pendingEmails.length }, function () {
       confirmBox('Send the survey?', 'Each pending learner gets their personal link by email (' + (ctx.C.cohort.language === 'es' ? 'Spanish' : 'English') + '). It is logged in Conversations.', 'Send').then(function (ok) {
         if (!ok) return;
         api('email.send', { cohortId: ctx.id, template: 'moduleFeedback', blockId: b.id, emails: pendingEmails }).then(function (r) {
@@ -643,11 +638,11 @@ function conversationModal(ctx, c) {
   });
 }
 
-function emailComposer(ctx, preselected) {
+function emailComposer(ctx, preselected, defaultTemplate) {
   var M = ctx.M, C = ctx.C, T = S.boot.emailTemplates || {};
   var lang = C.cohort.language === 'es' ? 'es' : 'en';
-  var names = { profile: 'Profile & goals link', moduleFeedback: 'Module feedback survey', certificate: 'Certificate', linkedin: 'LinkedIn tutorial', custom: 'Custom message' };
-  var tpl = selectEl(Object.keys(names).map(function (k) { return { value: k, label: names[k] + (T[k] && T[k].pending ? ' (text pending)' : '') }; }), 'custom');
+  var keys = Object.keys(T).filter(function (k) { return T[k].to === 'learner' && k !== 'progressReport' && k !== 'booksCode'; });
+  var tpl = selectEl(keys.map(function (k) { return { value: k, label: T[k].label + (T[k][lang] && T[k][lang].pending ? ' (text pending)' : '') }; }), defaultTemplate || 'custom');
   var blk = selectEl(C.blocks.filter(function (b) { return b.kind === 'course'; }).map(function (b) { return { value: b.id, label: blockLabel(b) }; }), '');
   var blkField = field('Module', blk);
   var subject = inputEl(''), body = textareaEl('', { rows: 7 });
@@ -659,21 +654,26 @@ function emailComposer(ctx, preselected) {
     var custom = k === 'custom';
     subject.readOnly = !custom; body.readOnly = !custom;
     subject.value = t ? t.subject : ''; body.value = t ? t.body : '';
-    note.textContent = custom ? 'Use {first} for the first name. Sent in ' + (lang === 'es' ? 'Spanish' : 'English') + ' style; write it in the cohort language.' :
-      (T[k] && T[k].pending ? 'This template still has placeholder text — it cannot be sent yet.' : 'Template text in ' + (lang === 'es' ? 'Spanish' : 'English') + '. {first}, {module} and the personal link are filled in for each learner.');
+    note.textContent = custom ? 'Use {first} for the first name. Write it in ' + (lang === 'es' ? 'Spanish' : 'English') + ', the cohort language.' :
+      (t && t.pending ? 'This template still has placeholder text — write it in Settings → Email templates.' : 'Template in ' + (lang === 'es' ? 'Spanish' : 'English') + ' (edit it in Settings → Email templates). The placeholders and personal links are filled in for each learner.');
   }
   tpl.addEventListener('change', sync);
   sync();
+  var payload = function (emails, test) { return { cohortId: ctx.id, template: tpl.value, blockId: blk.value, emails: emails, subject: tpl.value === 'custom' ? subject.value : null, body: tpl.value === 'custom' ? body.value : null, test: test }; };
   var m = modal('Send email · ' + C.cohort.name, [h('.epm-row2', field('Template', tpl), blkField), field('Recipients', picker), field('Subject', subject), field('Message', body), note,
-    h('p.epm-small.epm-muted', 'Sent from the program mailbox. Each email is logged in Conversations (Via: Email).')], {
+    h('p.epm-small.epm-muted', 'Sent from execprogram@adizes.com. Each email is logged in Conversations (Via: Email).')], {
     wide: true,
-    footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Send', { kind: 'primary', icon: 'mail' }, function () {
+    footer: [testBtn(function () {
+      var emails = picker.getValues(); if (!emails.length) emails = M.counted.slice(0, 1).map(function (e) { return e.email; });
+      if (!emails.length) return Promise.reject(new Error('Add a learner first'));
+      return api('email.send', payload(emails.slice(0, 1), true));
+    }), h('.epm-spacer'), btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Send', { kind: 'primary', icon: 'mail' }, function () {
       var emails = picker.getValues();
       if (!emails.length) return toast('Choose at least one recipient', 'error');
       if (tpl.value === 'custom' && (!subject.value.trim() || !body.value.trim())) return toast('Write a subject and a message', 'error');
       confirmBox('Send to ' + emails.length + ' learner(s)?', 'This sends real emails.', 'Send').then(function (ok) {
         if (!ok) return;
-        api('email.send', { cohortId: ctx.id, template: tpl.value, blockId: blk.value, emails: emails, subject: subject.value, body: body.value }).then(function (r) {
+        api('email.send', payload(emails, false)).then(function (r) {
           m.close(); toast(r.sent.length + ' sent' + (r.failed.length ? ' · failed: ' + r.failed.map(function (f) { return f.email + ' (' + errText(f.error) + ')'; }).join(', ') : ''), r.failed.length ? 'error' : null); ctx.reload();
         }).catch(fail);
       });
@@ -719,9 +719,33 @@ function structureEditor(ctx) {
   var card = h('.epm-card');
   var list = h('div');
   var saveBtn = btn('Save structure', { kind: 'primary' }, save);
-  append(card, [h('.epm-card-head', h('h3', 'Structure & dates'), h('.epm-actions', btn('Reschedule dates', { icon: 'sync', kind: 'ghost' }, reschedule), saveBtn)),
+  append(card, [h('.epm-card-head', h('h3', 'Structure & dates'), h('.epm-actions', btn('Import calendar CSV', { icon: 'upload', kind: 'ghost', title: 'Replace the structure with the program calendar sheet' }, importCalendar), btn('Reschedule dates', { icon: 'sync', kind: 'ghost' }, reschedule), saveBtn)),
     h('p.epm-muted.epm-small', 'Blocks and sessions in program order. Changes are kept here until you press “Save structure”. Removing a session also removes its attendance marks.'), list,
-    btn('Add block', { icon: 'plus', kind: 'ghost' }, function () { blocks.push({ id: 'new' + Date.now(), kind: 'course', number: '', title: 'New block' }); mark(); draw(); })]);
+    btn('Add block', { icon: 'plus', kind: 'ghost' }, function () { blocks.push({ id: 'new' + Date.now(), kind: 'course', number: '', title: 'New block', smeSeesFeedback: true }); mark(); draw(); })]);
+  function importCalendar() {
+    var file = h('input', { type: 'file', accept: '.csv,text/csv' });
+    var info = h('p.epm-small.epm-muted', 'In the Calendar sheet: File → Download → Comma-separated values (.csv).');
+    var parsed = null;
+    var marks = (C.attendance || []).length;
+    file.addEventListener('change', function () {
+      readCalendarFile(file).then(function (st) { parsed = st; info.textContent = structureSummary(st) + (st.warnings.length ? ' · ' + st.warnings.length + ' rows skipped' : ''); info.className = 'epm-small'; })
+        .catch(function (e) { parsed = null; info.textContent = e.message; info.className = 'epm-small epm-t-low'; });
+    });
+    var mm = modal('Import the program calendar', [field('Calendar CSV', file), info,
+      h('p.epm-small.epm-muted', 'Replaces every block and session of this cohort. Teachable course IDs and feedback settings are kept for blocks with the same title. ' +
+        (marks ? 'Attention: the ' + marks + ' attendance marks of this cohort will be removed when you save.' : ''))], {
+      footer: [btn('Cancel', { kind: 'ghost' }, function () { mm.close(); }), btn('Use this calendar', { kind: 'primary' }, function () {
+        if (!parsed) return toast('Choose the CSV first', 'error');
+        var old = {}; blocks.forEach(function (b) { old[b.kind + '|' + normName(b.title)] = b; });
+        blocks = parsed.blocks.map(function (b) {
+          var o = old[b.kind + '|' + normName(b.title)];
+          return Object.assign({}, b, { id: b.key, teachableCourseId: o ? o.teachableCourseId : '', smeSeesFeedback: o ? o.smeSeesFeedback !== false : true });
+        });
+        sessions = parsed.sessions.map(function (x, i) { return Object.assign({ id: 'new' + i + Date.now() }, x, { blockId: x.blockKey }); });
+        mm.close(); mark(); draw(); toast('Calendar loaded — review it and press “Save structure”');
+      })],
+    });
+  }
   function mark() { dirty = true; saveBtn.classList.add('epm-pulse'); }
   function sessionsOf(b) { return sessions.filter(function (s) { return s.blockId === b.id; }); }
   function draw() {

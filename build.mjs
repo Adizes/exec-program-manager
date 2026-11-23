@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8'));
 const VERSION = process.env.EPM_VERSION || pkg.version;
-const ORDER = ['core.js', 'charts.js', 'zoom.js', 'model.js', 'cohort.js', 'app.js', 'learner.js', 'main.js'];
+const ORDER = ['core.js', 'charts.js', 'zoom.js', 'model.js', 'cohort.js', 'features.js', 'planner.js', 'app.js', 'learner.js', 'main.js'];
 
 const css = readFileSync(join(here, 'src/styles.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\s*\n\s*/g, '\n').trim();
 let src = ORDER.map(f => `/* ---- ${f} ---- */\n` + readFileSync(join(here, 'src', f), 'utf8')).join('\n');

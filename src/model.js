@@ -66,20 +66,24 @@ function computeCohort(C) {
     }
     M.stats[e.email] = s;
   });
-  // per session, both against the people enrolled by then (fixed base, not a moving total):
-  //   rate = attended / enrolled · activeRate = still in the program / enrolled
+  // Per session:
+  //  rate       = attended / learners expected that day (people who left count only for the sessions before they left)
+  //  launchRate / activeRate = attended / still in the program, both against everyone enrolled by then (overview chart)
   M.sessionRate = {};
   C.sessions.forEach(function (s) {
-    var base = 0, p = 0, active = 0, marks = 0;
+    var base = 0, p = 0, active = 0, marks = 0, exp = 0, expP = 0;
     M.enrollments.forEach(function (e) {
       if (s.date && M.startOf(e) > s.date) return;
       base++;
-      if (INACTIVE.indexOf(e.status) < 0 || (e.statusDate && s.date && s.date <= e.statusDate)) active++;
+      var left = INACTIVE.indexOf(e.status) >= 0;
+      if (!left || (e.statusDate && s.date && s.date <= e.statusDate)) active++;
       var v = (M.att[e.email] || {})[s.id];
       if (v) marks++;
-      if (v === 'Present' && attApplies(e, s.date)) p++;
+      var applies = attApplies(e, s.date);
+      if (v === 'Present' && applies) p++;
+      if (applies) { exp++; if (v === 'Present') expP++; }
     });
-    M.sessionRate[s.id] = marks && base ? { rate: p / base, activeRate: active / base, p: p, active: active, base: base } : null;
+    M.sessionRate[s.id] = marks && base ? { rate: exp ? expP / exp : 0, p: expP, base: exp, launchRate: p / base, activeRate: active / base, launchP: p, launch: base } : null;
   });
   M.kpi = {
     learners: M.counted.length,

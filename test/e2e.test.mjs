@@ -1,7 +1,7 @@
 // End-to-end: real bundle in Chromium against the local server (real Code.gs with fake Google services).
 // IMPORT_DIR=/path/to/json npm test   → runs with real cohort data. Screenshots in test/out/.
 import { createRequire } from 'node:module';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -13,6 +13,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 const OUT = join(here, 'out'); mkdirSync(OUT, { recursive: true });
 
 const srv = await start({ port: 8799 });
+// Program calendar CSV: CAL_CSV=/path/to/Calendar.csv, otherwise a small synthetic one
+let CAL = process.env.CAL_CSV;
+if (!CAL || !existsSync(CAL)) {
+  CAL = join(OUT, 'calendar.csv');
+  writeFileSync(CAL, [',,PROGRAM STUDENT CALENDAR - Test,,,', 'Week ,Live Session,,Course ,Module No.,Modules', ',Date,Date,,,',
+    ',,26 Aug 26,Onboarding,0,Onboarding', ',,2 Sep 26,Welcome ,0,Welcome to the program',
+    'Week 1,7 Sep 26,9 Sep 26,"Introduction to the Methodology\nShoham",1,The Conceptual Map',
+    'Week 2,14 Sep 26,16 Sep 26,"Management Styles\nAlex",2.1,Change',
+    'Week 3,21 Sep 26,23 Sep 26,,2.2,Roles', 'Week 4,28 Sep 26,30 Sep 26,"Case Study\nSam",CS.1,Analyzing Case Study - 1',
+    ',Holidays Break Weeks,,,,', ',,,,,', 'Week 5,12 Oct 26,14 Oct 26,"Management Styles\nAlex",2.3,Leadership',
+    'Week 6,19 Oct 26,21 Oct 26,"Lifecycles\nShoham",3.1,Early stages', 'Week 7,26 Oct 26,28 Oct 26,,3.2,Late stages',
+    'Week 8,2 Nov 26,4 Nov 26,Wrap-up,0,Q&A and Graduation'].join('\n'));
+}
 const URL0 = srv.url;
 const browser = await pw.chromium.launch();
 const errors = [];
@@ -42,6 +55,9 @@ async function signIn(page, email) {
   await page.click('button:has-text("Sign in")');
   await page.waitForSelector('.epm-top');
 }
+const topOverlay = (page) => page.locator('.epm-overlay').last();
+const lastEmail = async () => (await (await fetch(URL0 + '/__emails')).json()).pop();
+const csvCell = (v) => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v);
 const noHScroll = async (page) => page.evaluate(() => document.scrollingElement.scrollWidth <= window.innerWidth + 1);
 const idle = (page) => page.waitForFunction(() => !document.querySelector('.epm-progress.on'), null, { timeout: 15000 });
 
@@ -118,6 +134,35 @@ await step('weekly feedback capture', async () => {
   assert.ok(await page.$('.epm-modal h3:has-text("Capture session feedback")'), 'the next entry form stays open');
   await page.keyboard.press('Escape'); await idle(page);
 });
+await step('weekly feedback: CSV import replaces everything', async () => {
+  const Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: C6.id });
+  const held = Cx.sessions.filter(x => x.date && x.date <= new Date().toISOString().slice(0, 10)).slice(-3);
+  const L = Cx.learners.slice(0, 3);
+  const lines = [['Weekly Feedback'], ['Date', 'Name', 'Module', 'SME', '1. Program content', '2. SMEs', '3. Technical', '4. Pace', '5. Community', '6. What would you improve?', '7. Comments']];
+  held.forEach((x, i) => L.forEach((l, j) => lines.push([x.date.slice(5, 7) + '/' + x.date.slice(8) + '/' + x.date.slice(0, 4), l.firstName + ' ' + l.lastName, '', 'Someone', 5, 4, 3 + (j % 3), 4, 5, i ? '' : 'More cases', 'Great'])));
+  lines.push([held[0].date, 'Unknown', '', '', 4, 4, 4, 4, 4, '', '']);
+  writeFileSync(join(OUT, 'weekly.csv'), lines.map(r => r.map(csvCell).join(',')).join('\n'));
+  await page.goto(URL0 + '/#/c/' + C6.id + '/feedback'); await page.waitForSelector('button:has-text("Import CSV")');
+  await page.click('button:has-text("Import CSV")');
+  await page.setInputFiles('.epm-modal input[type=file]', join(OUT, 'weekly.csv'));
+  await page.waitForSelector('.epm-modal .epm-kpis'); await shot(page, '08b-weekly-csv');
+  await page.click('.epm-modal button:has-text("Replace session feedback")');
+  await topOverlay(page).locator('button:has-text("Replace")').click();
+  await page.waitForSelector('.epm-toast:has-text("responses imported")'); await idle(page);
+  const W = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: C6.id }).weeklyFeedback;
+  assert.equal(W.length, held.length * L.length + 1);
+  assert.ok(W.filter(w => w.email).length === held.length * L.length, 'names matched to learners');
+});
+await step('weekly feedback: delete a response (confirm dialog)', async () => {
+  const count = () => srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: C6.id }).weeklyFeedback.length;
+  const before = count();
+  await page.click('.epm-details summary >> nth=0').catch(() => {});
+  await page.click('button[aria-label="Edit"] >> nth=0');
+  await page.click('.epm-modal button:has-text("Delete")');
+  await topOverlay(page).locator('button:has-text("Delete")').click();
+  await page.waitForFunction(() => !document.querySelector('.epm-overlay')); await idle(page);
+  assert.equal(count(), before - 1);
+});
 await step('conversations: bulk log', async () => {
   await page.click('a.epm-tab:has-text("Conversations")'); await page.waitForSelector('button:has-text("Log conversation")');
   await page.click('button:has-text("Log conversation")');
@@ -166,6 +211,8 @@ await step('Zoom CSV import matches by name and saves', async () => {
 await step('new cohort wizard from template', async () => {
   await page.goto(URL0 + '/#/cohorts'); await page.click('button:has-text("New cohort")');
   await page.fill('.epm-modal input >> nth=0', 'Cohort 9');
+  assert.equal(await page.$eval('.epm-modal select:has(option[value=csv])', x => x.value), 'csv', 'the calendar CSV is the default source');
+  await page.selectOption('.epm-modal select:has(option[value=csv])', 'template');
   await page.fill('.epm-modal input[type=date] >> nth=0', '2027-01-06');
   await page.fill('.epm-modal input[type=date] >> nth=1', '2027-01-11');
   await page.fill('.epm-modal textarea', '2027-04-01');
@@ -176,6 +223,127 @@ await step('new cohort wizard from template', async () => {
   await page.waitForSelector('.epm-sblock', { timeout: 15000 });
 });
 
+await step('new cohort wizard from the calendar CSV', async () => {
+  await page.goto(URL0 + '/#/cohorts'); await page.click('button:has-text("New cohort")');
+  await page.fill('.epm-modal input >> nth=0', 'Cohort 10');
+  await page.setInputFiles('.epm-modal input[type=file]', CAL);
+  await page.waitForFunction(() => /blocks · \d+ sessions/.test(document.querySelector('.epm-modal-body')?.textContent || ''));
+  await shot(page, '12b-new-cohort-csv');
+  await page.click('.epm-modal button:has-text("Create cohort")');
+  await page.waitForSelector('.epm-sblock', { timeout: 15000 });
+  const c = srv.G.post({ action: 'bootstrap', token: srv.pmToken }).cohorts.find(x => x.name === 'Cohort 10');
+  const Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: c.id });
+  assert.ok(Cx.sessions.length >= 10 && Cx.sessions.every(x => x.date), 'sessions with dates');
+  assert.ok(Cx.blocks.some(b => b.kind === 'case_study') && Cx.blocks.some(b => b.kind === 'welcome'));
+  assert.ok(Cx.blocks.every(b => b.smeSeesFeedback === true), 'SMEs see feedback by default');
+  assert.ok(!Cx.blocks.some(b => /onboarding/i.test(b.title)), 'onboarding is skipped');
+});
+await step('structure editor: import calendar CSV keeps Teachable IDs', async () => {
+  const c = srv.G.post({ action: 'bootstrap', token: srv.pmToken }).cohorts.find(x => x.name === 'Cohort 10');
+  await page.goto(URL0 + '/#/c/' + c.id + '/settings'); await page.waitForSelector('.epm-sblock');
+  await page.click('button:has-text("Import calendar CSV")');
+  await page.setInputFiles('.epm-modal input[type=file]', CAL);
+  await page.waitForFunction(() => /blocks · /.test(document.querySelector('.epm-modal-body')?.textContent || ''));
+  await page.click('.epm-modal button:has-text("Use this calendar")');
+  await page.waitForSelector('.epm-toast:has-text("Calendar loaded")');
+});
+await step('remove enrollment really removes the learner', async () => {
+  const c = srv.G.post({ action: 'bootstrap', token: srv.pmToken }).cohorts.find(x => x.name === 'Cohort 10');
+  srv.G.post({ action: 'learner.add', token: srv.pmToken, cohortId: c.id, people: [{ email: 'remove.me@x.com', firstName: 'Remove', lastName: 'Me' }] });
+  await page.goto(URL0 + '/#/c/' + c.id + '/learners'); await page.reload(); await page.waitForSelector('.epm-table-click tbody tr');
+  await page.click('.epm-table-click tbody tr:has-text("Remove Me")'); await page.waitForSelector('.epm-drawer');
+  await page.click('.epm-drawer a:has-text("Program")');
+  await page.click('button:has-text("Remove enrollment")');
+  await topOverlay(page).locator('button:has-text("Remove")').click();
+  await page.waitForFunction(() => !document.querySelector('.epm-drawer')); await idle(page);
+  const Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: c.id });
+  assert.ok(!Cx.enrollments.some(e => e.email === 'remove.me@x.com'));
+});
+await step('add learners: rows only, no email is sent', async () => {
+  const c = srv.G.post({ action: 'bootstrap', token: srv.pmToken }).cohorts.find(x => x.name === 'Cohort 10');
+  await page.goto(URL0 + '/#/c/' + c.id + '/learners'); await page.click('button:has-text("Add learners")'); await page.waitForSelector('.epm-modal input[type=email]');
+  assert.equal(await page.$$eval('.epm-modal textarea', x => x.length), 0, 'no paste box');
+  const n = (await (await fetch(URL0 + '/__emails')).json()).length;
+  await page.fill('.epm-modal input[type=email] >> nth=0', 'new.person@x.com');
+  await page.fill('.epm-modal input >> nth=1', 'New'); await page.fill('.epm-modal input >> nth=2', 'Person');
+  await page.click('.epm-modal button:has-text("Add learners")');
+  await page.waitForFunction(() => !document.querySelector('.epm-overlay'), null, { timeout: 15000 }); await idle(page);
+  assert.ok(srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: c.id }).enrollments.some(e => e.email === 'new.person@x.com'), 'added');
+  assert.equal((await (await fetch(URL0 + '/__emails')).json()).length, n, 'nothing emailed');
+});
+await step('registration link modal', async () => {
+  const c = srv.G.post({ action: 'bootstrap', token: srv.pmToken }).cohorts.find(x => x.name === 'Cohort 10');
+  await page.goto(URL0 + '/#/c/' + c.id + '/learners'); await page.click('button:has-text("Registration form")');
+  await page.waitForSelector('.epm-modal input[readonly]');
+  assert.match(await page.$eval('.epm-modal input[readonly]', x => x.value), /exec-program-profile\?c=/);
+  await shot(page, '16-registration-link');
+});
+await step('SME reminder: test send', async () => {
+  await page.goto(URL0 + '/#/c/' + C6.id + '/calendar'); await page.waitForSelector('.epm-block');
+  const b = page.locator('.epm-block-meta button').first();
+  if (await b.count()) {
+    await b.click(); await page.waitForSelector('.epm-modal');
+    await shot(page, '17-sme-reminder');
+    await page.click('.epm-modal button:has-text("Send test to me")');
+    await page.waitForSelector('.epm-toast:has-text("Test sent")');
+    assert.match((await lastEmail()).subject, /^\[TEST\]/);
+  }
+});
+await step('progress report PDF: download and test email', async () => {
+  await page.goto(URL0 + '/#/c/' + C6.id + '/learners'); await page.waitForSelector('.epm-table-click tbody tr');
+  await page.click('.epm-table-click tbody tr >> nth=0'); await page.waitForSelector('.epm-drawer');
+  await page.click('button:has-text("Progress report (PDF)")'); await page.waitForSelector('.epm-modal:has-text("Progress report")');
+  const [dl] = await Promise.all([page.waitForEvent('download', { timeout: 20000 }), page.click('.epm-modal button:has-text("Download PDF")')]);
+  const pdfPath = join(OUT, 'report.pdf'); await dl.saveAs(pdfPath);
+  assert.ok(readFileSync(pdfPath).slice(0, 4).toString() === '%PDF');
+  await shot(page, '18-report-modal');
+  const n0 = srv.G.state.emails.length;
+  await page.click('.epm-modal button:has-text("Send test to me")');
+  for (let i = 0; i < 80 && srv.G.state.emails.length === n0; i++) await page.waitForTimeout(250);
+  const m = await lastEmail(); assert.match(m.subject, /^\[TEST\]/); assert.ok(m.attachments === 1, 'PDF attached');
+});
+await step('email templates: edit and send test', async () => {
+  await page.goto(URL0 + '/#/settings'); await page.waitForSelector('h3:has-text("Email templates")');
+  await page.locator('.epm-card:has(h3:has-text("Email templates"))').scrollIntoViewIfNeeded(); await shot(page, '15b-templates');
+  await page.locator('.epm-card:has(h3:has-text("Email templates")) button:has-text("Send test to me")').click();
+  await page.waitForSelector('.epm-toast:has-text("Test sent")');
+});
+await step('planner: timeline, month and SME availability', async () => {
+  await page.goto(URL0 + '/#/planner'); await page.waitForSelector('.epm-gantt-bar');
+  await page.waitForTimeout(200); await shot(page, '50-planner-timeline');
+  await page.click('a.epm-tab:has-text("Month")'); await page.waitForSelector('.epm-month-day');
+  await shot(page, '51-planner-month');
+  await page.click('a.epm-tab:has-text("SME availability")'); await page.waitForSelector('.epm-gantt');
+  await page.click('button:has-text("Add time off")');
+  await page.selectOption('.epm-modal select', 'shoham@adizes.com');
+  await page.fill('.epm-modal input[type=date] >> nth=0', '2027-01-18'); await page.fill('.epm-modal input[type=date] >> nth=1', '2027-01-22');
+  await page.fill('.epm-modal input >> nth=2', 'Conference');
+  await page.click('.epm-modal button:has-text("Save")'); await page.waitForSelector('.epm-gantt-off');
+  await shot(page, '52-planner-smes');
+});
+await step('planner: draft a cohort, reorder, check conflicts, create it', async () => {
+  await page.click('a.epm-tab:has-text("Cohort drafts")'); await page.click('button:has-text("New draft")');
+  await page.waitForSelector('.epm-dtable');
+  await page.fill('.epm-deditor input >> nth=0', 'Cohort 11 draft');
+  await page.fill('.epm-deditor input[type=date] >> nth=0', '2027-01-06');
+  await page.fill('.epm-deditor input[type=date] >> nth=1', '2027-01-11'); await page.dispatchEvent('.epm-deditor input[type=date] >> nth=1', 'change');
+  await page.waitForSelector('.epm-dtable td:has-text("Jan 27")');
+  const t1 = await page.$$eval('.epm-dtable tbody tr td:nth-child(2) input', x => x.map(i => i.value));
+  await page.click('.epm-dtable tbody tr >> nth=2 >> button[aria-label="Move up"]');
+  const t2 = await page.$$eval('.epm-dtable tbody tr td:nth-child(2) input', x => x.map(i => i.value));
+  assert.equal(t2[1], t1[2], 'course moved up');
+  // Shoham on a course that runs in his time off → conflict
+  await page.selectOption('.epm-dtable tbody tr >> nth=3 >> td:nth-child(3) select', 'shoham@adizes.com');
+  await page.waitForSelector('.epm-deditor .epm-gantt');
+  await shot(page, '53-planner-draft');
+  await page.click('button:has-text("Save draft")'); await page.waitForSelector('.epm-toast:has-text("Draft saved")');
+  await page.click('button:has-text("Create cohort from this draft")');
+  await page.fill('.epm-modal input', 'Cohort 11'); await page.click('.epm-modal button:has-text("Create")');
+  await page.waitForSelector('.epm-sblock', { timeout: 15000 });
+  const c = srv.G.post({ action: 'bootstrap', token: srv.pmToken }).cohorts.find(x => x.name === 'Cohort 11');
+  const Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: c.id });
+  assert.equal(Cx.blocks[1].title, t1[2]); assert.ok(Cx.sessions.every(x => x.date >= '2027-01-06'));
+});
 await step('SME performance chart', async () => {
   await page.goto(URL0 + '/#/smes'); await page.waitForSelector('.epm-toolbar select');
   await page.selectOption('.epm-toolbar select', 'shoham@adizes.com');
@@ -197,15 +365,16 @@ await step('team & settings pages render', async () => {
 console.log('learner link');
 const learnerCtx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true });
 const lp = await learnerCtx.newPage(); watch(lp);
-await step('learner opens the personal link (mobile), saves profile and goals', async () => {
+await step('learner opens the personal link (mobile), saves goals', async () => {
   const Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: C6.id });
   const l = Cx.learners[0];
   await lp.goto(URL0 + '/profile?t=' + l.profileLink.split('t=')[1]);
   await lp.waitForSelector('form.epm-lf-form');
   assert.ok(await noHScroll(lp), 'no horizontal scroll');
   await shot(lp, '20-learner-form');
-  await lp.fill('form.epm-lf-form textarea >> nth=1', 'Learn the methodology from the source');
-  await lp.click('button:has-text("Save my profile")');
+  assert.equal(await lp.$$eval('form.epm-lf-form input', x => x.length), 0, 'goals only');
+  await lp.fill('form.epm-lf-form textarea >> nth=0', 'Learn the methodology from the source');
+  await lp.click('form.epm-lf-form button[type=submit]');
   await lp.waitForSelector('.epm-lf-done'); await shot(lp, '21-learner-done');
   const g = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: C6.id }).goals.find(x => x.email === l.email);
   assert.equal(g.a1, 'Learn the methodology from the source');
@@ -214,7 +383,29 @@ const spa = cohorts.find(c => c.language === 'es');
 if (spa) await step('Spanish cohort → form in Spanish', async () => {
   const Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: spa.id });
   await lp.goto(URL0 + '/profile?t=' + Cx.learners[0].profileLink.split('t=')[1]);
-  await lp.waitForSelector('text=Tu perfil de participante'); await shot(lp, '22-learner-es');
+  await lp.waitForSelector('text=Objetivos e intenciones'); await shot(lp, '22-learner-es');
+});
+await step('registration form: required fields, then register and overwrite', async () => {
+  const c = srv.G.post({ action: 'bootstrap', token: srv.pmToken }).cohorts.find(x => x.name === 'Cohort 10');
+  const link = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: c.id }).registrationLink;
+  const url = URL0 + '/profile?' + link.split('?')[1];
+  await lp.goto(url); await lp.waitForSelector('form.epm-lf-form');
+  assert.ok(await noHScroll(lp)); await shot(lp, '23-registration');
+  await lp.click('form.epm-lf-form button[type=submit]'); await lp.waitForSelector('.epm-invalid');
+  const fill = async (company) => {
+    await lp.fill('input[autocomplete=given-name]', 'Ana'); await lp.fill('input[autocomplete=family-name]', 'Prueba');
+    await lp.fill('input[type=email]', 'ana.prueba@x.com'); await lp.fill('input[autocomplete=organization]', company);
+    await lp.fill('input[autocomplete=organization-title]', 'CEO'); await lp.fill('input[type=date]', '1985-04-02'); await lp.fill('input[type=tel]', '+52 55 1234 5678');
+    if (!(await lp.isChecked('.epm-checks input >> nth=0'))) await lp.check('.epm-checks input >> nth=0');
+  };
+  await fill('Acme'); await lp.click('form.epm-lf-form button[type=submit]'); await lp.waitForSelector('.epm-lf-done'); await shot(lp, '24-registration-done');
+  let Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: c.id });
+  assert.ok(Cx.enrollments.some(e => e.email === 'ana.prueba@x.com'), 'enrolled');
+  srv.G.post({ action: 'learner.update', token: srv.pmToken, email: 'ana.prueba@x.com', patch: { P: '9', lifecycle: 'Adolescence' } });
+  await lp.goto(url); await fill('Acme 2'); await lp.click('form.epm-lf-form button[type=submit]'); await lp.waitForSelector('.epm-lf-done');
+  Cx = srv.G.post({ action: 'cohort.get', token: srv.pmToken, id: c.id });
+  const l = Cx.learners.find(x => x.email === 'ana.prueba@x.com');
+  assert.equal(l.company, 'Acme 2'); assert.equal(Cx.enrollments.filter(e => e.email === 'ana.prueba@x.com').length, 1, 'no duplicates');
 });
 await step('invalid link shows a message', async () => {
   await lp.goto(URL0 + '/profile?t=nope'); await lp.waitForSelector('text=not valid');
@@ -238,7 +429,7 @@ await step('SME sees only assigned cohorts and no conversations', async () => {
   await signIn(sp, 'shoham@adizes.com');
   await sp.waitForSelector('.epm-ccard, .epm-empty');
   const tabsText = await sp.$$eval('.epm-nav a', as => as.map(a => a.textContent));
-  assert.deepEqual(tabsText, ['My cohorts', 'My ratings']);
+  assert.deepEqual(tabsText, ['My cohorts', 'Planner', 'My ratings']);
   if (await sp.$('.epm-ccard')) {
     await sp.click('.epm-ccard >> nth=0'); await sp.waitForSelector('.epm-tabs');
     const t = await sp.$$eval('.epm-tab', as => as.map(a => a.textContent));
@@ -247,6 +438,8 @@ await step('SME sees only assigned cohorts and no conversations', async () => {
     await shot(sp, '40-sme-learners');
   }
   await sp.goto(URL0 + '/#/smes'); await sp.waitForSelector('.epm-card'); await sp.waitForTimeout(300); await shot(sp, '41-sme-ratings');
+  await sp.goto(URL0 + '/#/planner/smes'); await sp.waitForSelector('.epm-gantt'); await shot(sp, '42-sme-planner');
+  assert.equal(await sp.$$eval('a.epm-tab', x => x.filter(a => /drafts/i.test(a.textContent)).length), 0, 'no drafts for SMEs');
   await sc.close();
 });
 

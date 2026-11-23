@@ -36,6 +36,11 @@ var ERRORS = {
   invalid_self_demote: 'You cannot remove your own Program Manager access.',
   invalid_link: 'This link is not valid. Please contact the program team. · Este enlace no es válido; escríbenos para ayudarte.',
   invalid_import_format: 'This file is not an import file from tools/migrate.py.',
+  invalid_sender: 'Emails cannot leave from execprogram@adizes.com: the Apps Script must be deployed with that account (see Settings → Integrations).',
+  invalid_no_books_code: 'This learner has no books code yet.',
+  invalid_no_sme_email: 'This block has no SME with an account. Assign one in Settings → Structure.',
+  invalid_too_many: 'Too many submissions. Please try again in a few minutes. · Demasiados envíos; intenta en unos minutos.',
+  invalid_pdf: 'The PDF could not be attached.',
   network: 'Could not reach the server. Check your connection and try again.',
 };
 function errText(code) { return ERRORS[code] || String(code || 'Something went wrong').replace(/^invalid_/, '').replace(/_/g, ' '); }
@@ -152,8 +157,15 @@ function copyText(s) {
 }
 
 /* ---------------- toast / modal / confirm ---------------- */
+// Modals and toasts live in a layer attached to <body>, outside the Webflow page structure,
+// so fixed positioning always uses the whole window (the site's wrappers can clip it otherwise).
+function portal() {
+  var p = document.getElementById('epm-portal');
+  if (!p) { p = h('#epm-portal.epm-root.epm-portal'); document.body.appendChild(p); }
+  return p;
+}
 function toast(msg, kind) {
-  var root = document.getElementById(ROOT_ID);
+  var root = portal();
   var wrap = $('.epm-toasts', root) || root.appendChild(h('.epm-toasts', { role: 'status', 'aria-live': 'polite' }));
   var t = h('.epm-toast', { class: kind ? 'epm-toast-' + kind : '' }, msg);
   wrap.appendChild(t);
@@ -163,16 +175,24 @@ function fail(e) { toast(e && e.message ? e.message : String(e), 'error'); }
 
 function modal(title, body, opts) {
   opts = opts || {};
-  var root = document.getElementById(ROOT_ID);
-  var prevFocus = document.activeElement;
-  var close = function () { ov.remove(); document.removeEventListener('keydown', onKey); if (prevFocus && prevFocus.focus) prevFocus.focus(); if (opts.onClose) opts.onClose(); };
-  var onKey = function (e) { if (e.key === 'Escape') close(); };
+  var root = portal();
+  var prevFocus = document.activeElement, closed = false;
+  var close = function () {
+    if (closed) return; closed = true;
+    ov.remove(); document.removeEventListener('keydown', onKey);
+    if (!root.querySelector('.epm-overlay')) document.documentElement.classList.remove('epm-noscroll');
+    if (prevFocus && prevFocus.focus) prevFocus.focus();
+    if (opts.onClose) opts.onClose();
+  };
+  // Escape closes only the top-most window
+  var onKey = function (e) { var all = root.querySelectorAll('.epm-overlay'); if (e.key === 'Escape' && all[all.length - 1] === ov) close(); };
   var panel = h('.epm-modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': title, class: opts.wide ? 'epm-modal-wide' : (opts.drawer ? 'epm-drawer' : '') },
     h('.epm-modal-head', h('h3', title), btn('', { icon: 'close', kind: 'ghost', aria: 'Close' }, close)),
     h('.epm-modal-body', body),
     opts.footer ? h('.epm-modal-foot', opts.footer) : null);
   var ov = h('.epm-overlay', { class: opts.drawer ? 'epm-overlay-drawer' : '', onmousedown: function (e) { if (e.target === ov) close(); } }, panel);
   root.appendChild(ov);
+  document.documentElement.classList.add('epm-noscroll');
   document.addEventListener('keydown', onKey);
   setTimeout(function () { var f = panel.querySelector('input,select,textarea,button:not(.epm-btn-ghost)'); if (f) f.focus(); }, 30);
   return { close: close, panel: panel, body: $('.epm-modal-body', panel) };
@@ -180,7 +200,8 @@ function modal(title, body, opts) {
 function confirmBox(title, text, okLabel, danger) {
   return new Promise(function (res) {
     var m;
-    var ok = btn(okLabel || 'Confirm', { kind: danger ? 'danger' : 'primary' }, function () { m.close(); res(true); });
+    // resolve first: closing the window also fires onClose (→ false), which must not win
+    var ok = btn(okLabel || 'Confirm', { kind: danger ? 'danger' : 'primary' }, function () { res(true); m.close(); });
     m = modal(title, h('p.epm-p', text), { footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); res(false); }), ok], onClose: function () { res(false); } });
   });
 }

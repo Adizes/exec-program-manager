@@ -1,4 +1,4 @@
-/*! Adizes · Exec Program Manager v1.2.0 · github.com/Adizes/exec-program-manager */
+/*! Adizes · Exec Program Manager v1.3.0 · github.com/Adizes/exec-program-manager */
 (function(){
 'use strict';
 /* ---- core.js ---- */
@@ -6,7 +6,7 @@
  * CORE — config, API client, state, DOM helpers, router, UI primitives
  * =================================================================================== */
 var CFG = window.EPM_CONFIG || {};
-var VERSION = "1.2.0";
+var VERSION = "1.3.0";
 var ROOT_ID = CFG.mount || 'epm-app';
 var LS_KEY = 'epm_session_v1';
 
@@ -40,6 +40,11 @@ var ERRORS = {
   invalid_self_demote: 'You cannot remove your own Program Manager access.',
   invalid_link: 'This link is not valid. Please contact the program team. · Este enlace no es válido; escríbenos para ayudarte.',
   invalid_import_format: 'This file is not an import file from tools/migrate.py.',
+  invalid_sender: 'Emails cannot leave from execprogram@adizes.com: the Apps Script must be deployed with that account (see Settings → Integrations).',
+  invalid_no_books_code: 'This learner has no books code yet.',
+  invalid_no_sme_email: 'This block has no SME with an account. Assign one in Settings → Structure.',
+  invalid_too_many: 'Too many submissions. Please try again in a few minutes. · Demasiados envíos; intenta en unos minutos.',
+  invalid_pdf: 'The PDF could not be attached.',
   network: 'Could not reach the server. Check your connection and try again.',
 };
 function errText(code) { return ERRORS[code] || String(code || 'Something went wrong').replace(/^invalid_/, '').replace(/_/g, ' '); }
@@ -156,8 +161,15 @@ function copyText(s) {
 }
 
 /* ---------------- toast / modal / confirm ---------------- */
+// Modals and toasts live in a layer attached to <body>, outside the Webflow page structure,
+// so fixed positioning always uses the whole window (the site's wrappers can clip it otherwise).
+function portal() {
+  var p = document.getElementById('epm-portal');
+  if (!p) { p = h('#epm-portal.epm-root.epm-portal'); document.body.appendChild(p); }
+  return p;
+}
 function toast(msg, kind) {
-  var root = document.getElementById(ROOT_ID);
+  var root = portal();
   var wrap = $('.epm-toasts', root) || root.appendChild(h('.epm-toasts', { role: 'status', 'aria-live': 'polite' }));
   var t = h('.epm-toast', { class: kind ? 'epm-toast-' + kind : '' }, msg);
   wrap.appendChild(t);
@@ -167,16 +179,24 @@ function fail(e) { toast(e && e.message ? e.message : String(e), 'error'); }
 
 function modal(title, body, opts) {
   opts = opts || {};
-  var root = document.getElementById(ROOT_ID);
-  var prevFocus = document.activeElement;
-  var close = function () { ov.remove(); document.removeEventListener('keydown', onKey); if (prevFocus && prevFocus.focus) prevFocus.focus(); if (opts.onClose) opts.onClose(); };
-  var onKey = function (e) { if (e.key === 'Escape') close(); };
+  var root = portal();
+  var prevFocus = document.activeElement, closed = false;
+  var close = function () {
+    if (closed) return; closed = true;
+    ov.remove(); document.removeEventListener('keydown', onKey);
+    if (!root.querySelector('.epm-overlay')) document.documentElement.classList.remove('epm-noscroll');
+    if (prevFocus && prevFocus.focus) prevFocus.focus();
+    if (opts.onClose) opts.onClose();
+  };
+  // Escape closes only the top-most window
+  var onKey = function (e) { var all = root.querySelectorAll('.epm-overlay'); if (e.key === 'Escape' && all[all.length - 1] === ov) close(); };
   var panel = h('.epm-modal', { role: 'dialog', 'aria-modal': 'true', 'aria-label': title, class: opts.wide ? 'epm-modal-wide' : (opts.drawer ? 'epm-drawer' : '') },
     h('.epm-modal-head', h('h3', title), btn('', { icon: 'close', kind: 'ghost', aria: 'Close' }, close)),
     h('.epm-modal-body', body),
     opts.footer ? h('.epm-modal-foot', opts.footer) : null);
   var ov = h('.epm-overlay', { class: opts.drawer ? 'epm-overlay-drawer' : '', onmousedown: function (e) { if (e.target === ov) close(); } }, panel);
   root.appendChild(ov);
+  document.documentElement.classList.add('epm-noscroll');
   document.addEventListener('keydown', onKey);
   setTimeout(function () { var f = panel.querySelector('input,select,textarea,button:not(.epm-btn-ghost)'); if (f) f.focus(); }, 30);
   return { close: close, panel: panel, body: $('.epm-modal-body', panel) };
@@ -184,7 +204,8 @@ function modal(title, body, opts) {
 function confirmBox(title, text, okLabel, danger) {
   return new Promise(function (res) {
     var m;
-    var ok = btn(okLabel || 'Confirm', { kind: danger ? 'danger' : 'primary' }, function () { m.close(); res(true); });
+    // resolve first: closing the window also fires onClose (→ false), which must not win
+    var ok = btn(okLabel || 'Confirm', { kind: danger ? 'danger' : 'primary' }, function () { res(true); m.close(); });
     m = modal(title, h('p.epm-p', text), { footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); res(false); }), ok], onClose: function () { res(false); } });
   });
 }
@@ -571,20 +592,24 @@ function computeCohort(C) {
     }
     M.stats[e.email] = s;
   });
-  // per session, both against the people enrolled by then (fixed base, not a moving total):
-  //   rate = attended / enrolled · activeRate = still in the program / enrolled
+  // Per session:
+  //  rate       = attended / learners expected that day (people who left count only for the sessions before they left)
+  //  launchRate / activeRate = attended / still in the program, both against everyone enrolled by then (overview chart)
   M.sessionRate = {};
   C.sessions.forEach(function (s) {
-    var base = 0, p = 0, active = 0, marks = 0;
+    var base = 0, p = 0, active = 0, marks = 0, exp = 0, expP = 0;
     M.enrollments.forEach(function (e) {
       if (s.date && M.startOf(e) > s.date) return;
       base++;
-      if (INACTIVE.indexOf(e.status) < 0 || (e.statusDate && s.date && s.date <= e.statusDate)) active++;
+      var left = INACTIVE.indexOf(e.status) >= 0;
+      if (!left || (e.statusDate && s.date && s.date <= e.statusDate)) active++;
       var v = (M.att[e.email] || {})[s.id];
       if (v) marks++;
-      if (v === 'Present' && attApplies(e, s.date)) p++;
+      var applies = attApplies(e, s.date);
+      if (v === 'Present' && applies) p++;
+      if (applies) { exp++; if (v === 'Present') expP++; }
     });
-    M.sessionRate[s.id] = marks && base ? { rate: p / base, activeRate: active / base, p: p, active: active, base: base } : null;
+    M.sessionRate[s.id] = marks && base ? { rate: exp ? expP / exp : 0, p: expP, base: exp, launchRate: p / base, activeRate: active / base, launchP: p, launch: base } : null;
   });
   M.kpi = {
     learners: M.counted.length,
@@ -708,7 +733,7 @@ function tabOverview(el, ctx) {
     xShort: function (lab) { return lab.split(' · ')[0]; },
     series: [
       { name: 'Still in the program', values: held.map(function (s) { return M.sessionRate[s.id].activeRate * 100; }) },
-      { name: 'Attended the session', values: held.map(function (s) { return M.sessionRate[s.id].rate * 100; }) }],
+      { name: 'Attended the session', values: held.map(function (s) { return M.sessionRate[s.id].launchRate * 100; }) }],
     yMin: 0, yMax: 100, yFmt: function (v) { return Math.round(v) + '%'; },
   }), h('p.epm-small.epm-muted', 'Both lines are a share of the ' + M.launch + ' learners enrolled at launch (plus anyone moved in later, from the date they joined). The gap between the lines is people still enrolled who did not attend.')));
   // ratings by block
@@ -727,6 +752,7 @@ function tabLearners(el, ctx) {
     selectEl([{ value: 'counted', label: 'Active in this cohort' }, { value: 'all', label: 'Everyone (incl. dropped / moved)' }], filter, { onchange: function () { filter = this.value; draw(); }, 'aria-label': 'Filter' }),
     h('.epm-spacer'),
     pm ? btn('Send email', { icon: 'mail', kind: 'ghost' }, function () { emailComposer(ctx, []); }) : null,
+    pm ? btn('Registration form', { icon: 'link', kind: 'ghost' }, function () { registrationModal(ctx); }) : null,
     pm ? btn('Add learners', { icon: 'plus', kind: 'primary' }, function () { addLearnersModal(ctx); }) : null);
   var wrap = h('div');
   append(el, [bar, wrap]);
@@ -734,7 +760,7 @@ function tabLearners(el, ctx) {
     clear(wrap);
     var list = filter === 'all' ? M.enrollments : M.counted;
     if (!list.length) { wrap.appendChild(empty('No learners yet.', pm ? btn('Add learners', { icon: 'plus', kind: 'primary' }, function () { addLearnersModal(ctx); }) : null)); return; }
-    var heads = ['Learner', 'Status', 'Attendance', 'LMS', 'Session ★', 'Module ★'].concat(pm ? ['Conv.', 'Profile', 'Kit', 'Books', 'Cert.'] : []).concat(['P', 'A', 'E', 'I', 'Lifecycle']);
+    var heads = ['Learner', 'Status', 'Attendance', 'LMS', 'Session ★', 'Module ★'].concat(pm ? ['Conv.', 'Registered', 'Kit', 'Books', 'Cert.'] : []).concat(['P', 'A', 'E', 'I', 'Lifecycle']);
     wrap.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-click', h('thead', h('tr', heads.map(function (x, i) { return h('th', { class: i > 1 ? 'num' : '' }, x); }))),
       h('tbody', list.map(function (e) {
         var l = M.learner[e.email] || { email: e.email }, s = M.stats[e.email];
@@ -743,7 +769,7 @@ function tabLearners(el, ctx) {
           h('td', statusBadge(e.status, e)),
           h('td.num', pctCell(s.att)), h('td.num', pctCell(s.lms)),
           h('td.num', s.exp == null ? '—' : num(s.exp)), h('td.num', s.mod == null ? '—' : num(s.mod)),
-          pm ? [h('td.num', String(s.convs)), h('td.num', l.profileSubmittedAt ? badge('Done', 'good') : badge('—', 'muted')), h('td.num', l.welcomeKit || '—'), h('td.num', l.booksCode || '—'), h('td.num', e.certificationSent || '—')] : null,
+          pm ? [h('td.num', String(s.convs)), h('td.num', l.profileSubmittedAt ? badge('Yes', 'good') : badge('—', 'muted')), h('td.num', l.welcomeKit || '—'), h('td.num', l.booksCode || '—'), h('td.num', e.certificationSent || '—')] : null,
           ['P', 'A', 'E', 'I'].map(function (k) { return h('td.num', l[k] == null ? '—' : String(l[k])); }),
           h('td.num', l.lifecycle || '—'));
       })))));
@@ -754,30 +780,20 @@ function tabLearners(el, ctx) {
 
 function addLearnersModal(ctx) {
   var rows = h('.epm-rows');
-  var addRow = function (v) {
-    v = v || {};
-    var r = h('.epm-row3', inputEl(v.email, { placeholder: 'email@company.com', type: 'email', 'aria-label': 'Email' }), inputEl(v.firstName, { placeholder: 'First name', 'aria-label': 'First name' }), inputEl(v.lastName, { placeholder: 'Last name', 'aria-label': 'Last name' }),
+  var addRow = function () {
+    var r = h('.epm-row3', inputEl('', { placeholder: 'email@company.com', type: 'email', 'aria-label': 'Email' }), inputEl('', { placeholder: 'First name', 'aria-label': 'First name' }), inputEl('', { placeholder: 'Last name', 'aria-label': 'Last name' }),
       btn('', { icon: 'close', kind: 'ghost', aria: 'Remove row' }, function () { r.remove(); }));
     rows.appendChild(r);
   };
   addRow();
-  var paste = textareaEl('', { rows: 3, placeholder: 'Or paste rows from a spreadsheet: email, first name, last name (one person per line)' });
-  paste.addEventListener('change', function () {
-    paste.value.split(/\n/).map(function (l) { return l.split(/\t|,|;/).map(function (x) { return x.trim(); }); }).filter(function (p) { return p[0] && p[0].indexOf('@') > 0; })
-      .forEach(function (p) { addRow({ email: p[0], firstName: p[1], lastName: p[2] }); });
-    Array.prototype.slice.call(rows.children).forEach(function (r) { if (!r.children[0].value) r.remove(); });
-    paste.value = '';
-  });
-  var send = h('input', { type: 'checkbox', checked: true });
   var m = modal('Add learners to ' + ctx.C.cohort.name, [
-    h('p.epm-p', 'Each learner gets a personal link to complete their profile and goals. The email is sent in the cohort language (' + (ctx.C.cohort.language === 'es' ? 'Spanish' : 'English') + ').'),
-    rows, btn('Add another', { icon: 'plus', kind: 'ghost' }, function () { addRow(); }), paste,
-    h('label.epm-check', send, h('span', 'Send the profile link now'))], {
+    h('p.epm-p', 'Enrolls them in this cohort. No email is sent: share the registration form or the Goals & intentions link whenever you want.'),
+    rows, btn('Add another', { icon: 'plus', kind: 'ghost' }, function () { addRow(); })], {
     wide: true,
     footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Add learners', { kind: 'primary' }, function () {
       var people = Array.prototype.slice.call(rows.children).map(function (r) { return { email: r.children[0].value.trim(), firstName: r.children[1].value.trim(), lastName: r.children[2].value.trim() }; }).filter(function (p) { return p.email; });
       if (!people.length) return toast('Add at least one email', 'error');
-      api('learner.add', { cohortId: ctx.id, people: people, sendProfileLink: send.checked }).then(function (res) {
+      api('learner.add', { cohortId: ctx.id, people: people }).then(function (res) {
         m.close();
         toast(res.added.length + ' added' + (res.skipped.length ? ' · ' + res.skipped.length + ' skipped (' + res.skipped.map(function (s) { return s.email + ': ' + s.reason.replace(/_/g, ' '); }).join(', ') + ')' : ''), res.skipped.length ? 'error' : null);
         ctx.reload();
@@ -796,7 +812,8 @@ function tabCalendar(el, ctx) {
     var ss = M.blockSessions[b.id] || [];
     var card = h('.epm-card.epm-block');
     card.appendChild(h('.epm-block-head', h('div', h('span.epm-block-no', b.kind === 'course' ? b.number : (b.kind === 'case_study' ? b.number : '')), h('b', b.title)),
-      h('span.epm-muted', smeLabel(b) ? 'SME: ' + smeLabel(b) : '')));
+      h('.epm-block-meta', h('span.epm-muted', smeLabel(b) ? 'SME: ' + smeLabel(b) : ''),
+        pm && (b.smeEmail || b.smeName) && ss.length ? btn(b.reminderSentAt ? 'Reminded' : 'Remind SME', { icon: b.reminderSentAt ? 'check' : 'mail', kind: 'ghost', title: b.reminderSentAt ? 'Reminder sent ' + fmtDateTime(b.reminderSentAt) : 'Email the SME one week before the course (automatic)' }, function () { smeReminderModal(ctx, b); }) : null)));
     var tb = h('tbody');
     ss.forEach(function (s) {
       if (prev && s.date && prev.date && (pd(s.date) - pd(prev.date)) / 864e5 > 10) tb.appendChild(h('tr.epm-break', h('td', { colspan: '5' }, 'Break · ' + Math.round((pd(s.date) - pd(prev.date)) / 864e5 / 7 - 1) + ' week(s) without sessions')));
@@ -808,10 +825,10 @@ function tabCalendar(el, ctx) {
         h('td', h('b', s.moduleNo || ''), ' ', s.moduleTitle || '', s.smeEmail || s.smeName ? h('div.epm-small.epm-muted', 'SME: ' + smeLabel(s)) : null),
         h('td.epm-small', s.defreeze ? h('span.epm-defreeze', { title: 'Defreeze question' }, icon('chat', 14), h('span', s.defreeze)) : (done && pm ? h('span.epm-muted', 'No defreeze yet') : '')),
         h('td.epm-nowrap', recs.length ? recs.map(function (u, i) { return h('a.epm-link.epm-rec', { href: u, target: '_blank', rel: 'noopener', onclick: function (e) { e.stopPropagation(); } }, icon('play', 14), recs.length > 1 ? 'Rec ' + (i + 1) : 'Recording'); }) : (done ? h('span.epm-muted.epm-small', 'No recording') : '')),
-        h('td.num', rate ? h('span', { title: rate.p + ' of ' + rate.base + ' enrolled learners attended' }, pctCell(rate.rate)) : '')));
+        h('td.num', rate ? h('span', { title: rate.p + ' of ' + rate.base + ' current learners attended' }, pctCell(rate.rate)) : '')));
     });
     card.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-sm.epm-cal', h('colgroup', h('col', { style: { width: '120px' } }), h('col', { style: { width: '36%' } }), h('col'), h('col', { style: { width: '170px' } }), h('col', { style: { width: '96px' } })),
-      h('thead', h('tr', h('th', 'Date'), h('th', 'Module'), h('th', 'Defreeze'), h('th', 'Recording'), h('th.num', { title: 'Learners who attended, out of everyone enrolled at that date' }, 'Attendance'))), tb)));
+      h('thead', h('tr', h('th', 'Date'), h('th', 'Module'), h('th', 'Defreeze'), h('th', 'Recording'), h('th.num', { title: 'Learners who attended, out of the learners expected that day (people who dropped out or moved count only for the sessions before they left)' }, 'Attendance'))), tb)));
     el.appendChild(card);
   });
 }
@@ -899,7 +916,7 @@ function tabAttendance(el, ctx) {
           return cell;
         }));
     }));
-    var foot = h('tfoot', h('tr', h('td.epm-sticky', { title: 'Per session: learners who attended out of everyone enrolled at that date' }, 'Attended'), h('td.num', pctCell(M.kpi.attendance)),
+    var foot = h('tfoot', h('tr', h('td.epm-sticky', { title: 'Per session: learners who attended, out of the learners expected that day. People who dropped out or moved count only for the sessions before they left; the overall % only includes people still in the program.' }, 'Attended'), h('td.num', pctCell(M.kpi.attendance)),
       sessions.map(function (s) { var r = M.sessionRate[s.id]; return h('td.num.epm-small', { class: gstart[s.id] ? 'epm-gstart' : '', title: r ? r.p + ' of ' + r.base : '' }, r ? Math.round(r.rate * 100) + '%' : ''); })));
     wrap.appendChild(h('.epm-table-wrap.epm-att-wrap', h('table.epm-table.epm-att-table', thead, tbody, foot)));
   }
@@ -1009,7 +1026,7 @@ function tabLms(el, ctx) {
       }).catch(fail);
     }) : null));
   if (!M.lmsBlocks.length) { el.appendChild(empty('No Teachable course IDs in this cohort yet.', pm ? btn('Add them in Settings → Structure', {}, function () { go('c/' + ctx.id + '/settings'); }) : null)); return; }
-  el.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-click', h('thead', h('tr', h('th.epm-sticky', 'Learner'), h('th.num', 'Overall'), M.lmsBlocks.map(function (b) { return h('th.num', { title: b.title }, b.kind === 'welcome' ? 'W' : b.number); }))),
+  el.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-click', h('thead', h('tr', h('th.epm-sticky', 'Learner'), h('th.num', 'Overall'), M.lmsBlocks.map(function (b) { return h('th.num.epm-lms-h', { title: blockLabel(b) }, h('span', b.kind === 'welcome' ? 'Welcome' : b.number + '. ' + b.title)); }))),
     h('tbody', M.counted.map(function (e) {
       var lm = M.lms[e.email] || {};
       return h('tr', { tabindex: '0', onclick: function () { lmsDetailModal(ctx, e.email); }, onkeydown: function (ev) { if (ev.key === 'Enter') lmsDetailModal(ctx, e.email); } },
@@ -1059,7 +1076,9 @@ function tabFeedback(el, ctx) {
 
 function feedbackWeekly(el, ctx) {
   var M = ctx.M, C = ctx.C, pm = isPM();
-  if (pm) el.appendChild(h('.epm-toolbar', h('p.epm-muted', 'Ratings from the end-of-session survey (1–5).'), h('.epm-spacer'), btn('Capture feedback', { icon: 'plus', kind: 'primary' }, function () { weeklyEntryModal(ctx); })));
+  if (pm) el.appendChild(h('.epm-toolbar', h('p.epm-muted', 'Ratings from the end-of-session survey (1–5).'), h('.epm-spacer'),
+    btn('Import CSV', { icon: 'upload', kind: 'ghost', title: 'Replace all the session feedback with the Weekly Feedback sheet' }, function () { weeklyCsvModal(ctx); }),
+    btn('Capture feedback', { icon: 'plus', kind: 'primary' }, function () { weeklyEntryModal(ctx); })));
   var list = (C.weeklyFeedback || []).slice().sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); });
   if (!list.length) { el.appendChild(empty('No session feedback yet.')); return; }
   // by SME
@@ -1161,7 +1180,8 @@ function moduleLinksModal(ctx, b, answered) {
         h('td.epm-nowrap', btn('Copy link', { icon: 'copy', kind: 'ghost' }, function () { copyText(u); })));
     }))))], {
     wide: true,
-    footer: [btn('Close', { kind: 'ghost' }, function () { m.close(); }), btn('Email the ' + pendingEmails.length + ' pending', { icon: 'mail', kind: 'primary', disabled: !pendingEmails.length }, function () {
+    footer: [pendingEmails.length ? testBtn(function () { return api('email.send', { cohortId: ctx.id, template: 'moduleFeedback', blockId: b.id, emails: pendingEmails.slice(0, 1), test: true }); }) : null,
+      h('.epm-spacer'), btn('Close', { kind: 'ghost' }, function () { m.close(); }), btn('Email the ' + pendingEmails.length + ' pending', { icon: 'mail', kind: 'primary', disabled: !pendingEmails.length }, function () {
       confirmBox('Send the survey?', 'Each pending learner gets their personal link by email (' + (ctx.C.cohort.language === 'es' ? 'Spanish' : 'English') + '). It is logged in Conversations.', 'Send').then(function (ok) {
         if (!ok) return;
         api('email.send', { cohortId: ctx.id, template: 'moduleFeedback', blockId: b.id, emails: pendingEmails }).then(function (r) {
@@ -1276,11 +1296,11 @@ function conversationModal(ctx, c) {
   });
 }
 
-function emailComposer(ctx, preselected) {
+function emailComposer(ctx, preselected, defaultTemplate) {
   var M = ctx.M, C = ctx.C, T = S.boot.emailTemplates || {};
   var lang = C.cohort.language === 'es' ? 'es' : 'en';
-  var names = { profile: 'Profile & goals link', moduleFeedback: 'Module feedback survey', certificate: 'Certificate', linkedin: 'LinkedIn tutorial', custom: 'Custom message' };
-  var tpl = selectEl(Object.keys(names).map(function (k) { return { value: k, label: names[k] + (T[k] && T[k].pending ? ' (text pending)' : '') }; }), 'custom');
+  var keys = Object.keys(T).filter(function (k) { return T[k].to === 'learner' && k !== 'progressReport' && k !== 'booksCode'; });
+  var tpl = selectEl(keys.map(function (k) { return { value: k, label: T[k].label + (T[k][lang] && T[k][lang].pending ? ' (text pending)' : '') }; }), defaultTemplate || 'custom');
   var blk = selectEl(C.blocks.filter(function (b) { return b.kind === 'course'; }).map(function (b) { return { value: b.id, label: blockLabel(b) }; }), '');
   var blkField = field('Module', blk);
   var subject = inputEl(''), body = textareaEl('', { rows: 7 });
@@ -1292,21 +1312,26 @@ function emailComposer(ctx, preselected) {
     var custom = k === 'custom';
     subject.readOnly = !custom; body.readOnly = !custom;
     subject.value = t ? t.subject : ''; body.value = t ? t.body : '';
-    note.textContent = custom ? 'Use {first} for the first name. Sent in ' + (lang === 'es' ? 'Spanish' : 'English') + ' style; write it in the cohort language.' :
-      (T[k] && T[k].pending ? 'This template still has placeholder text — it cannot be sent yet.' : 'Template text in ' + (lang === 'es' ? 'Spanish' : 'English') + '. {first}, {module} and the personal link are filled in for each learner.');
+    note.textContent = custom ? 'Use {first} for the first name. Write it in ' + (lang === 'es' ? 'Spanish' : 'English') + ', the cohort language.' :
+      (t && t.pending ? 'This template still has placeholder text — write it in Settings → Email templates.' : 'Template in ' + (lang === 'es' ? 'Spanish' : 'English') + ' (edit it in Settings → Email templates). The placeholders and personal links are filled in for each learner.');
   }
   tpl.addEventListener('change', sync);
   sync();
+  var payload = function (emails, test) { return { cohortId: ctx.id, template: tpl.value, blockId: blk.value, emails: emails, subject: tpl.value === 'custom' ? subject.value : null, body: tpl.value === 'custom' ? body.value : null, test: test }; };
   var m = modal('Send email · ' + C.cohort.name, [h('.epm-row2', field('Template', tpl), blkField), field('Recipients', picker), field('Subject', subject), field('Message', body), note,
-    h('p.epm-small.epm-muted', 'Sent from the program mailbox. Each email is logged in Conversations (Via: Email).')], {
+    h('p.epm-small.epm-muted', 'Sent from execprogram@adizes.com. Each email is logged in Conversations (Via: Email).')], {
     wide: true,
-    footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Send', { kind: 'primary', icon: 'mail' }, function () {
+    footer: [testBtn(function () {
+      var emails = picker.getValues(); if (!emails.length) emails = M.counted.slice(0, 1).map(function (e) { return e.email; });
+      if (!emails.length) return Promise.reject(new Error('Add a learner first'));
+      return api('email.send', payload(emails.slice(0, 1), true));
+    }), h('.epm-spacer'), btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Send', { kind: 'primary', icon: 'mail' }, function () {
       var emails = picker.getValues();
       if (!emails.length) return toast('Choose at least one recipient', 'error');
       if (tpl.value === 'custom' && (!subject.value.trim() || !body.value.trim())) return toast('Write a subject and a message', 'error');
       confirmBox('Send to ' + emails.length + ' learner(s)?', 'This sends real emails.', 'Send').then(function (ok) {
         if (!ok) return;
-        api('email.send', { cohortId: ctx.id, template: tpl.value, blockId: blk.value, emails: emails, subject: subject.value, body: body.value }).then(function (r) {
+        api('email.send', payload(emails, false)).then(function (r) {
           m.close(); toast(r.sent.length + ' sent' + (r.failed.length ? ' · failed: ' + r.failed.map(function (f) { return f.email + ' (' + errText(f.error) + ')'; }).join(', ') : ''), r.failed.length ? 'error' : null); ctx.reload();
         }).catch(fail);
       });
@@ -1352,9 +1377,33 @@ function structureEditor(ctx) {
   var card = h('.epm-card');
   var list = h('div');
   var saveBtn = btn('Save structure', { kind: 'primary' }, save);
-  append(card, [h('.epm-card-head', h('h3', 'Structure & dates'), h('.epm-actions', btn('Reschedule dates', { icon: 'sync', kind: 'ghost' }, reschedule), saveBtn)),
+  append(card, [h('.epm-card-head', h('h3', 'Structure & dates'), h('.epm-actions', btn('Import calendar CSV', { icon: 'upload', kind: 'ghost', title: 'Replace the structure with the program calendar sheet' }, importCalendar), btn('Reschedule dates', { icon: 'sync', kind: 'ghost' }, reschedule), saveBtn)),
     h('p.epm-muted.epm-small', 'Blocks and sessions in program order. Changes are kept here until you press “Save structure”. Removing a session also removes its attendance marks.'), list,
-    btn('Add block', { icon: 'plus', kind: 'ghost' }, function () { blocks.push({ id: 'new' + Date.now(), kind: 'course', number: '', title: 'New block' }); mark(); draw(); })]);
+    btn('Add block', { icon: 'plus', kind: 'ghost' }, function () { blocks.push({ id: 'new' + Date.now(), kind: 'course', number: '', title: 'New block', smeSeesFeedback: true }); mark(); draw(); })]);
+  function importCalendar() {
+    var file = h('input', { type: 'file', accept: '.csv,text/csv' });
+    var info = h('p.epm-small.epm-muted', 'In the Calendar sheet: File → Download → Comma-separated values (.csv).');
+    var parsed = null;
+    var marks = (C.attendance || []).length;
+    file.addEventListener('change', function () {
+      readCalendarFile(file).then(function (st) { parsed = st; info.textContent = structureSummary(st) + (st.warnings.length ? ' · ' + st.warnings.length + ' rows skipped' : ''); info.className = 'epm-small'; })
+        .catch(function (e) { parsed = null; info.textContent = e.message; info.className = 'epm-small epm-t-low'; });
+    });
+    var mm = modal('Import the program calendar', [field('Calendar CSV', file), info,
+      h('p.epm-small.epm-muted', 'Replaces every block and session of this cohort. Teachable course IDs and feedback settings are kept for blocks with the same title. ' +
+        (marks ? 'Attention: the ' + marks + ' attendance marks of this cohort will be removed when you save.' : ''))], {
+      footer: [btn('Cancel', { kind: 'ghost' }, function () { mm.close(); }), btn('Use this calendar', { kind: 'primary' }, function () {
+        if (!parsed) return toast('Choose the CSV first', 'error');
+        var old = {}; blocks.forEach(function (b) { old[b.kind + '|' + normName(b.title)] = b; });
+        blocks = parsed.blocks.map(function (b) {
+          var o = old[b.kind + '|' + normName(b.title)];
+          return Object.assign({}, b, { id: b.key, teachableCourseId: o ? o.teachableCourseId : '', smeSeesFeedback: o ? o.smeSeesFeedback !== false : true });
+        });
+        sessions = parsed.sessions.map(function (x, i) { return Object.assign({ id: 'new' + i + Date.now() }, x, { blockId: x.blockKey }); });
+        mm.close(); mark(); draw(); toast('Calendar loaded — review it and press “Save structure”');
+      })],
+    });
+  }
   function mark() { dirty = true; saveBtn.classList.add('epm-pulse'); }
   function sessionsOf(b) { return sessions.filter(function (s) { return s.blockId === b.id; }); }
   function draw() {
@@ -1428,6 +1477,890 @@ function structureEditor(ctx) {
   return card;
 }
 
+/* ---- features.js ---- */
+/* ===================================================================================
+ * FEATURES — registration link, CSV imports (weekly feedback, calendar), SME reminders,
+ * email templates, test sends and the PDF progress report
+ * =================================================================================== */
+
+/* ------------------------------- shared: test send ------------------------------- */
+// A "Send test to me" button. send(test=true) must return a promise.
+function testBtn(send) {
+  return btn('Send test to me', { icon: 'mail', kind: 'ghost', title: 'Sends this email only to you, marked [TEST]' }, function () {
+    send(true).then(function (r) { toast('Test sent to ' + ((r && r.to) || S.user.email)); }).catch(fail);
+  });
+}
+
+/* ------------------------------- registration link ------------------------------- */
+function registrationModal(ctx) {
+  var link = h('input.epm-input', { readOnly: true, value: ctx.C.registrationLink || '' });
+  var m = modal('Registration form · ' + ctx.C.cohort.name, [
+    h('p.epm-p', 'Share this link with new participants. They fill in all their data (in ' + (ctx.C.cohort.language === 'es' ? 'Spanish' : 'English') +
+      '); if someone answers again with the same email, their data is updated — never their PAEI or Lifecycle.'),
+    field('Link', link),
+    h('.epm-actions', btn('Copy link', { icon: 'copy', kind: 'primary' }, function () { copyText(link.value); }),
+      h('a.epm-btn.epm-btn-ghost', { href: link.value, target: '_blank', rel: 'noopener' }, icon('ext'), h('span', 'Open form')),
+      btn('Email it to learners…', { icon: 'mail', kind: 'ghost' }, function () { m.close(); emailComposer(ctx, [], 'registration'); })),
+    h('.epm-card.epm-card-flat', h('h4', 'New link'), h('p.epm-small.epm-muted', 'Creates a new link and turns off the current one (for example, if it was shared by mistake).'),
+      btn('Generate a new link', { icon: 'sync', kind: 'danger-ghost' }, function () {
+        confirmBox('Generate a new link?', 'The current link stops working immediately.', 'Generate', true).then(function (ok) {
+          if (!ok) return;
+          api('cohort.regLink', { cohortId: ctx.id, regenerate: true }).then(function (r) { link.value = r.link; ctx.C.registrationLink = r.link; delete S.cohorts[ctx.id]; toast('New link ready'); }).catch(fail);
+        });
+      }))], { wide: true });
+}
+
+/* ------------------------------- weekly feedback CSV ------------------------------- */
+// "11/10/2026" (month/day, as Google Sheets exports in the US), "10/11/2026" when the first part > 12, or ISO
+function parseSheetDate(s) {
+  s = String(s || '').trim();
+  var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return m[1] + '-' + m[2] + '-' + m[3];
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (m) {
+    var a = +m[1], b = +m[2], y = +m[3]; if (y < 100) y += 2000;
+    var mo = a > 12 ? b : a, d = a > 12 ? a : b;
+    return y + '-' + ('0' + mo).slice(-2) + '-' + ('0' + d).slice(-2);
+  }
+  return parseCalDate(s);
+}
+
+function parseWeeklyCsv(text, M) {
+  var rows = parseCsv(text).filter(function (r) { return r.some(function (x) { return x !== ''; }); });
+  var hi = rows.findIndex(function (r) { var l = r.map(function (x) { return x.toLowerCase(); }); return l.some(function (x) { return /^date/.test(x); }) && l.some(function (x) { return /^name/.test(x); }); });
+  if (hi < 0) throw new Error('Could not find the header row (Date, Name, Module, SME, …).');
+  var H = rows[hi].map(function (x) { return x.toLowerCase(); });
+  var col = function (re) { for (var i = 0; i < H.length; i++) if (re.test(H[i])) return i; return -1; };
+  var cDate = col(/^date/), cName = col(/^name/), cMod = col(/^module/), cSme = col(/^sme/);
+  var cQ = [1, 2, 3, 4, 5].map(function (n) { var c = col(new RegExp('^' + n + '\\.')); return c >= 0 ? c : cSme + n; });
+  var cImp = col(/^6\.|improve/), cCom = col(/^7\.|comment/);
+  var learners = M.enrollments.map(function (e) { return M.learner[e.email]; }).filter(Boolean);
+  var out = { records: [], unmatched: {}, noSession: 0, anonymous: 0 };
+  rows.slice(hi + 1).forEach(function (r) {
+    var qs = cQ.map(function (c) { var v = Number(String(r[c] || '').replace(',', '.')); return r[c] !== '' && !isNaN(v) ? v : null; });
+    if (!qs.some(function (v) { return v != null; })) return;
+    var name = (r[cName] || '').trim(), date = parseSheetDate(r[cDate]);
+    var rec = { date: date, q1: qs[0], q2: qs[1], q3: qs[2], q4: qs[3], q5: qs[4], smeName: cSme >= 0 ? r[cSme] : '', improve: cImp >= 0 ? r[cImp] : '', comments: cCom >= 0 ? r[cCom] : '' };
+    if (!name || /^(unknown|uknown|anonymous|an[oó]nimo)$/i.test(name)) { out.anonymous++; rec.nameRaw = ''; }
+    else {
+      var best = null, bs = 0;
+      learners.forEach(function (l) { var sc = nameScore(name, fullName(l)); if (sc > bs) { bs = sc; best = l; } });
+      if (best && bs >= 0.8) rec.email = best.email; else { rec.nameRaw = name; out.unmatched[name] = (out.unmatched[name] || 0) + 1; }
+    }
+    // session: same date; otherwise the closest session (±4 days) of the block named in "Module" ("3. CAPI")
+    var s = M.C.sessions.find(function (x) { return x.date === date; });
+    var num = String(r[cMod] || '').match(/^\s*(\d+)/);
+    var blk = num ? M.C.blocks.find(function (b) { return b.kind === 'course' && b.number === num[1]; }) : null;
+    if (!s && blk && date) {
+      var near = (M.blockSessions[blk.id] || []).filter(function (x) { return x.date && Math.abs((pd(x.date) - pd(date)) / 864e5) <= 4; });
+      s = near[0];
+    }
+    if (s) { rec.sessionId = s.id; rec.blockId = s.blockId; } else { out.noSession++; if (blk) rec.blockId = blk.id; }
+    out.records.push(rec);
+  });
+  return out;
+}
+
+function weeklyCsvModal(ctx) {
+  var file = h('input', { type: 'file', accept: '.csv,text/csv' });
+  var out = h('div', h('p.epm-muted', 'In the Weekly Feedback sheet: File → Download → Comma-separated values (.csv), then choose the file here.'));
+  var parsed = null;
+  file.addEventListener('change', function () {
+    var f = file.files[0]; if (!f) return;
+    f.text().then(function (txt) {
+      try { parsed = parseWeeklyCsv(txt, ctx.M); } catch (e) { parsed = null; clear(out); out.appendChild(h('p.epm-t-low', e.message)); return; }
+      clear(out);
+      var un = Object.keys(parsed.unmatched);
+      append(out, [
+        h('.epm-kpis', kpi('Responses in the file', String(parsed.records.length)), kpi('Now in the platform', String((ctx.C.weeklyFeedback || []).length)),
+          kpi('Without a session', String(parsed.noSession), parsed.noSession ? 'Kept with their date' : null, parsed.noSession ? 'mid' : null)),
+        un.length ? h('div', h('h4', 'Names not matched to a learner (' + un.length + ')'), h('p.epm-small.epm-muted', 'They are kept with the name as written.'),
+          h('p', un.map(function (n) { return badge(n + ' × ' + parsed.unmatched[n], 'muted'); }))) : h('p.epm-small', badge('Every name matched a learner', 'good')),
+        parsed.anonymous ? h('p.epm-small.epm-muted', parsed.anonymous + ' anonymous responses.') : null]);
+    });
+  });
+  var m = modal('Import session feedback (CSV)', [field('CSV file', file), out,
+    h('p.epm-small.epm-muted', 'The file replaces ALL the session feedback of ' + ctx.C.cohort.name + ' (including what was captured by hand).')], {
+    wide: true,
+    footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Replace session feedback', { kind: 'primary', icon: 'upload' }, function () {
+      if (!parsed || !parsed.records.length) return toast('Choose a CSV with responses first', 'error');
+      confirmBox('Replace the session feedback?', (ctx.C.weeklyFeedback || []).length + ' current responses will be replaced by ' + parsed.records.length + ' from the file.', 'Replace', true).then(function (ok) {
+        if (!ok) return;
+        api('weekly.replace', { cohortId: ctx.id, records: parsed.records }).then(function (r) { m.close(); toast(r.added + ' responses imported'); ctx.reload(); }).catch(fail);
+      });
+    })],
+  });
+}
+
+/* ------------------------------- calendar CSV (program calendar template) ------------------------------- */
+var MONTH_IDX = { jan: 0, ene: 0, feb: 1, mar: 2, apr: 3, abr: 3, may: 4, jun: 5, jul: 6, aug: 7, ago: 7, sep: 8, set: 8, oct: 9, nov: 10, dec: 11, dic: 11 };
+// "7 Sep 26", "07 Sept 2026", "2026-09-07", "9/7/2026"
+function parseCalDate(s) {
+  s = String(s || '').trim();
+  var m = s.match(/^(\d{1,2})[\s-]+([A-Za-zÁÉÍÓÚáéíóú]{3,})\.?[\s-]+(\d{2,4})$/);
+  if (m) {
+    var mi = MONTH_IDX[m[2].slice(0, 3).toLowerCase()]; if (mi == null) return '';
+    var y = +m[3]; if (y < 100) y += 2000;
+    return iso(new Date(Date.UTC(y, mi, +m[1])));
+  }
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  return m ? iso(new Date(Date.UTC(+m[3], +m[1] - 1, +m[2]))) : '';
+}
+function calBlockKind(t) {
+  t = normName(t);
+  if (/^welcome|^bienvenida/.test(t)) return 'welcome';
+  if (/case stud|caso/.test(t)) return 'case_study';
+  if (/wrap|graduation|graduaci|cierre/.test(t)) return 'wrapup';
+  if (/recap|summariz/.test(t)) return 'other';
+  return 'course';
+}
+// Reads the "PROGRAM STUDENT CALENDAR" sheet (Week | Live session dates | Course + SME | Module No. | Module)
+function calendarFromCsv(text) {
+  var rows = parseCsv(text);
+  var hi = rows.findIndex(function (r) { return r.some(function (x) { return /^course/i.test(x); }) && r.some(function (x) { return /^module/i.test(x); }); });
+  if (hi < 0) throw new Error('This does not look like the program calendar (no Course / Module columns).');
+  var H = rows[hi].map(function (x) { return x.trim().toLowerCase(); });
+  var cCourse = H.findIndex(function (x) { return /^course/.test(x); });
+  var cNo = H.findIndex(function (x) { return /^module\s*no|^no\.?$/.test(x); });
+  var cMod = H.findIndex(function (x, i) { return /^module/.test(x) && i !== cNo; });
+  var dateCols = []; for (var i = 1; i < cCourse; i++) dateCols.push(i);
+  var blocks = [], sessions = [], cur = null, nCourse = 0, nCs = 0, warnings = [];
+  rows.slice(hi + 1).forEach(function (r) {
+    var dates = dateCols.map(function (c) { return parseCalDate(r[c]); }).filter(Boolean);
+    var course = String(r[cCourse] || '').trim(), mod = String(r[cMod] || '').trim(), no = String(r[cNo] || '').trim();
+    if (!dates.length) return;                                     // breaks, notes, empty lines
+    if (/onboarding/i.test(course + ' ' + mod)) return;            // no live session
+    if (course) {
+      var lines = course.split(/\n/).map(function (x) { return x.trim(); }).filter(Boolean);
+      var title = lines[0], sme = lines.slice(1).join(' ');
+      var kind = calBlockKind(title);
+      if (!(cur && normName(cur._raw) === normName(title))) {       // same title after a break = same block
+        var number = kind === 'course' ? String(++nCourse) : kind === 'case_study' ? 'CS' + (++nCs) : kind === 'welcome' ? '0' : kind === 'wrapup' ? 'W' : '';
+        cur = { key: 'k' + blocks.length, _raw: title, kind: kind, number: number,
+          title: kind === 'welcome' ? 'Welcome' : kind === 'case_study' ? 'Case Study ' + nCs : kind === 'wrapup' ? 'Wrap-Up' : title,
+          smeName: sme, smeEmail: matchSmeEmail(sme), smeSeesFeedback: true };
+        blocks.push(cur);
+      } else if (sme && !cur.smeName) { cur.smeName = sme; cur.smeEmail = matchSmeEmail(sme); }
+    }
+    if (!cur) { warnings.push('Row without a course: ' + mod); return; }
+    var moduleNo = cur.kind === 'wrapup' ? '' : (no === '0' && cur.kind !== 'welcome' ? '' : no);
+    dates.forEach(function (d) { sessions.push({ blockKey: cur.key, date: d, moduleNo: moduleNo, moduleTitle: mod }); });
+  });
+  blocks.forEach(function (b) { delete b._raw; });
+  if (!sessions.length) throw new Error('No session dates found in the file.');
+  return { blocks: blocks, sessions: sessions, warnings: warnings };
+}
+function readCalendarFile(input) {
+  var f = input.files[0];
+  if (!f) return Promise.reject(new Error('Choose the CSV of the Calendar sheet'));
+  return f.text().then(calendarFromCsv);
+}
+function structureSummary(st) {
+  var ds = st.sessions.map(function (s) { return s.date; }).filter(Boolean).sort();
+  return st.blocks.length + ' blocks · ' + st.sessions.length + ' sessions' + (ds.length ? ' · ' + fmtDate(ds[0]) + ' → ' + fmtDate(ds[ds.length - 1]) : '');
+}
+
+/* ------------------------------- SME reminder ------------------------------- */
+function smeReminderModal(ctx, b) {
+  var T = (S.boot.emailTemplates || {}).smeReminder || {};
+  var lang = ctx.C.cohort.language === 'es' ? 'es' : 'en';
+  var ss = (ctx.M.blockSessions[b.id] || []).filter(function (s) { return s.date; });
+  var first = ss.length ? ss[0].date : '';
+  var due = first ? addDays(first, -7) : '';
+  var pending = T[lang] && T[lang].pending;
+  var m = modal('Reminder to the SME · ' + b.title, [
+    h('dl.epm-dl', [['SME', smeLabel(b) || '—'], ['Email', b.smeEmail || 'No account — assign the SME in Settings → Structure'], ['First session', first ? fmtDate(first, true) : '—'],
+      ['Automatic reminder', b.reminderSentAt ? 'Sent ' + fmtDateTime(b.reminderSentAt) : (due ? 'Will be sent on ' + fmtDate(due, true) + ' (one week before)' : '—')],
+      ['Teachable curriculum', b.teachableCourseId ? String(ctx.C.curriculumUrl || '').replace('{id}', b.teachableCourseId) : 'No Teachable course ID']].map(function (r) { return [h('dt', r[0]), h('dd', r[1])]; })),
+    pending ? h('p.epm-small', badge('Template text pending', 'mid'), ' Write it in Settings → Email templates; until then nothing is sent automatically.') : null], {
+    footer: [testBtn(function () { return api('sme.remind', { blockId: b.id, test: true }); }), h('.epm-spacer'), btn('Close', { kind: 'ghost' }, function () { m.close(); }),
+      btn(b.reminderSentAt ? 'Send again' : 'Send now', { kind: 'primary', icon: 'mail', disabled: !b.smeEmail || pending }, function () {
+        confirmBox('Send the reminder to ' + (smeLabel(b) || b.smeEmail) + '?', 'It goes to ' + b.smeEmail + '.', 'Send').then(function (ok) {
+          if (ok) api('sme.remind', { blockId: b.id }).then(function () { m.close(); toast('Reminder sent'); ctx.reload(); }).catch(fail);
+        });
+      })],
+  });
+}
+
+/* ------------------------------- email templates (Settings) ------------------------------- */
+function templatesCard() {
+  var T = S.boot.emailTemplates || {};
+  var keys = Object.keys(T).filter(function (k) { return k !== 'custom'; });
+  var key = selectEl(keys.map(function (k) { return { value: k, label: T[k].label + (T[k].pending ? ' · text pending' : '') }; }), keys[0]);
+  var lang = selectEl([{ value: 'en', label: 'English' }, { value: 'es', label: 'Spanish' }], 'en');
+  var subject = inputEl(''), body = textareaEl('', { rows: 10 }), cta = inputEl('', { placeholder: 'Button text (only when the email has a link)' });
+  var vars = h('p.epm-small.epm-muted'), state = h('span');
+  function load() {
+    var t = T[key.value], v = t[lang.value];
+    subject.value = v.subject; body.value = v.body; cta.value = v.cta || '';
+    vars.textContent = 'Placeholders: ' + t.vars.map(function (x) { return '{' + x + '}'; }).join('  ') + (t.to === 'sme' ? ' · sent to the SME' : ' · sent to the learner');
+    clear(state).appendChild(v.pending ? badge('Pending — cannot be sent yet', 'mid') : v.custom ? badge('Edited', 'good') : badge('Default text', 'muted'));
+  }
+  key.addEventListener('change', load); lang.addEventListener('change', load);
+  load();
+  return h('.epm-card', h('.epm-card-head', h('h3', 'Email templates'), state),
+    h('p.epm-small.epm-muted', 'Every email leaves from execprogram@adizes.com in the cohort language. Write the text here; {placeholders} are filled in for each person.'),
+    h('.epm-row2', field('Template', key), field('Language', lang)),
+    field('Subject', subject), field('Message', body, 'Leave an empty line between paragraphs. Links are clickable.'), field('Button', cta), vars,
+    h('.epm-actions',
+      btn('Save template', { kind: 'primary' }, function () {
+        api('templates.save', { key: key.value, lang: lang.value, subject: subject.value, body: body.value, cta: cta.value }).then(function (r) { T = S.boot.emailTemplates = r.templates; load(); toast('Template saved'); }).catch(fail);
+      }),
+      testBtn(function () { return api('templates.test', { key: key.value, lang: lang.value, subject: subject.value, body: body.value, cta: cta.value }); }),
+      btn('Back to default text', { kind: 'ghost' }, function () {
+        confirmBox('Go back to the default text?', 'Your version of this template will be deleted.', 'Reset', true).then(function (ok) {
+          if (ok) api('templates.save', { key: key.value, lang: lang.value, reset: true }).then(function (r) { T = S.boot.emailTemplates = r.templates; load(); toast('Default text restored'); }).catch(fail);
+        });
+      })));
+}
+
+/* ------------------------------- books code email ------------------------------- */
+function booksCodeEmail(ctx, l) {
+  if (!l.booksCode) return toast(ERRORS.invalid_no_books_code, 'error');
+  var T = (S.boot.emailTemplates || {}).booksCode || {};
+  var lang = ctx.C.cohort.language === 'es' ? 'es' : 'en';
+  var pending = T[lang] && T[lang].pending;
+  var send = function (test) { return api('email.send', { cohortId: ctx.id, template: 'booksCode', emails: [l.email], test: test }); };
+  var m = modal('Email the books code', [h('p.epm-p', 'To ', h('b', fullName(l)), ' (' + l.email + ') · code ', h('b', l.booksCode)),
+    pending ? h('p.epm-small', badge('Template text pending', 'mid'), ' Write it in Settings → Email templates.') : h('p.epm-small.epm-muted', 'Uses the “Books code” template in ' + (lang === 'es' ? 'Spanish' : 'English') + '. It is logged in Conversations.')], {
+    footer: [testBtn(send), h('.epm-spacer'), btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Send', { kind: 'primary', icon: 'mail', disabled: pending }, function () {
+      send(false).then(function (r) { if (r.failed.length) return toast(errText(r.failed[0].error), 'error'); m.close(); toast('Books code sent'); delete S.cohorts[ctx.id]; }).catch(fail);
+    })],
+  });
+}
+
+/* ------------------------------- PDF progress report ------------------------------- */
+var REPORT_TXT = {
+  en: { title: 'PROGRAM PROGRESS REPORT', participant: 'Participant', cohort: 'Cohort', date: 'Report date', current: 'Current course', journey: 'PROGRAM JOURNEY',
+    completed: 'Completed', currentL: 'Current', upcoming: 'Upcoming', attendance: 'ATTENDANCE', lms: 'LMS PROGRESS', sessionsAtt: 'sessions attended', rating: 'EXPERIENCE RATING',
+    ratingNote: 'Average of your ratings in the live session feedback surveys', noRating: 'No ratings submitted yet', byCourse: 'PROGRESS BY COURSE', course: 'Course', feedback: 'Feedback',
+    submitted: 'Submitted', notSubmitted: 'Not submitted', na: 'Not yet applicable', comments: 'Comments', none: '—',
+    defaultComment: 'Remember to review the course content in Teachable before each live session: it makes the sessions richer and more meaningful. As the program progresses the content becomes more technical, so preparation is increasingly important.\n\nPlease reach out if you need any help accessing the materials.' },
+  es: { title: 'REPORTE DE AVANCE DEL PROGRAMA', participant: 'Participante', cohort: 'Generación', date: 'Fecha del reporte', current: 'Curso actual', journey: 'RECORRIDO DEL PROGRAMA',
+    completed: 'Completado', currentL: 'Actual', upcoming: 'Próximo', attendance: 'ASISTENCIA', lms: 'AVANCE EN EL LMS', sessionsAtt: 'sesiones con asistencia', rating: 'CALIFICACIÓN DE LA EXPERIENCIA',
+    ratingNote: 'Promedio de tus calificaciones en las encuestas de cada sesión en vivo', noRating: 'Aún no hay calificaciones', byCourse: 'AVANCE POR CURSO', course: 'Curso', feedback: 'Feedback',
+    submitted: 'Enviado', notSubmitted: 'No enviado', na: 'Aún no aplica', comments: 'Comentarios', none: '—',
+    defaultComment: 'Recuerda revisar el contenido del curso en Teachable antes de cada sesión en vivo: así las sesiones son más ricas y significativas. Conforme avanza el programa el contenido se vuelve más técnico, por lo que la preparación es cada vez más importante.\n\nEscríbenos si necesitas ayuda para acceder a los materiales.' },
+};
+function loadScriptOnce(url, globalName) {
+  if (window[globalName]) return Promise.resolve(window[globalName]);
+  return new Promise(function (res, rej) {
+    var sc = document.createElement('script'); sc.src = url; sc.async = true;
+    sc.onload = function () { res(window[globalName]); }; sc.onerror = function () { rej(new Error('Could not load the PDF library')); };
+    document.head.appendChild(sc);
+  });
+}
+function imageData(url) {
+  return fetch(url).then(function (r) { if (!r.ok) throw new Error(); return r.blob(); }).then(function (b) {
+    return new Promise(function (res) { var fr = new FileReader(); fr.onload = function () { res(fr.result); }; fr.readAsDataURL(b); });
+  }).catch(function () { return null; });
+}
+// Everything the report shows, from the cohort bundle
+function reportData(ctx, email) {
+  var M = ctx.M, C = ctx.C, l = M.learner[email], st = M.stats[email], t = today();
+  var e = M.enr[email];
+  var blocks = C.blocks.map(function (b) {
+    var ds = (M.blockSessions[b.id] || []).map(function (s) { return s.date; }).filter(Boolean).sort();
+    var status = !ds.length ? 'upcoming' : ds[ds.length - 1] < t ? 'completed' : ds[0] <= t ? 'current' : 'upcoming';
+    return { b: b, first: ds[0], last: ds[ds.length - 1], status: status };
+  });
+  var current = blocks.find(function (x) { return x.status === 'current'; }) || blocks.filter(function (x) { return x.status === 'completed'; }).pop();
+  var courses = blocks.filter(function (x) { return x.b.kind === 'course'; }).map(function (x) {
+    var a = st.attByBlock[x.b.id], lp = (M.lms[email] || {})[x.b.id];
+    var fb = (C.moduleFeedback || []).some(function (f) { return f.email === email && f.blockId === x.b.id; });
+    return { n: x.b.number, title: x.b.title, started: x.status !== 'upcoming', att: a && a.t ? a.p / a.t : null, lms: lp ? (lp.p || 0) / 100 : null,
+      feedback: fb ? 'yes' : x.status === 'completed' ? 'no' : 'na' };
+  });
+  var journey = blocks.filter(function (x) { return ['welcome', 'course', 'case_study', 'wrapup'].indexOf(x.b.kind) >= 0; }).map(function (x) {
+    return { label: x.b.kind === 'welcome' ? 'W' : x.b.kind === 'course' ? 'C' + x.b.number : x.b.kind === 'case_study' ? x.b.number : 'END', status: x.status };
+  });
+  return { name: fullName(l), cohort: C.cohort.name + (C.cohort.code ? ' · ' + C.cohort.code : ''), current: current ? blockLabel(current.b) : '—',
+    att: st.att, present: st.present, total: st.total, lms: st.lms, rating: st.exp, courses: courses, journey: journey, status: e ? e.status : '' };
+}
+function buildReportPdf(ctx, email, comment) {
+  var lang = ctx.C.cohort.language === 'es' ? 'es' : 'en', L = REPORT_TXT[lang];
+  var D = reportData(ctx, email);
+  var lib = CFG.jspdfUrl || 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+  return Promise.all([loadScriptOnce(lib, 'jspdf'), imageData((CFG.assets || ASSETS) + 'adizes-logo-white.png')]).then(function (res) {
+    var jsPDF = res[0].jsPDF, logo = res[1];
+    var doc = new jsPDF({ unit: 'mm', format: 'a4' });
+    var W = 210, X = 16, IW = W - 2 * X;
+    var RED = [215, 20, 26], INK = [20, 20, 20], MUTED = [110, 110, 110], LINE = [225, 225, 222], GOOD = [29, 122, 53], TRACK = [236, 236, 234];
+    var col = function (c) { doc.setTextColor(c[0], c[1], c[2]); };
+    var fill = function (c) { doc.setFillColor(c[0], c[1], c[2]); };
+    var draw = function (c) { doc.setDrawColor(c[0], c[1], c[2]); };
+    // header
+    fill([17, 17, 17]); doc.rect(0, 0, W, 26, 'F'); fill(RED); doc.rect(0, 26, W, 1.6, 'F');
+    if (logo) { try { doc.addImage(logo, 'PNG', X, 7, 34, 11.5); } catch (e) { /* ignore */ } }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); col([255, 255, 255]); doc.text(L.title, W - X, 16, { align: 'right' });
+    // info
+    var y = 38;
+    var info = [[L.participant, D.name], [L.cohort, D.cohort], [L.current, D.current]];
+    info.forEach(function (r, i) {
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(9); col(MUTED); doc.text(r[0].toUpperCase(), X, y + i * 7.5);
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(11); col(INK); doc.text(String(r[1] || '—'), X + 38, y + i * 7.5);
+    });
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(9); col(MUTED); doc.text(L.date.toUpperCase(), W - X - 40, y, { align: 'left' });
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10); col(INK); doc.text(fmtDate(today()), W - X, y, { align: 'right' });
+    // journey
+    y = 68; section(L.journey, y); y += 10;
+    var n = D.journey.length, step = n > 1 ? IW / (n - 1) : 0;
+    draw(LINE); doc.setLineWidth(0.6); if (n > 1) doc.line(X, y, X + IW, y);
+    D.journey.forEach(function (j, i) {
+      var cx = X + i * step;
+      if (j.status === 'completed') { fill(INK); doc.circle(cx, y, 2.2, 'F'); }
+      else if (j.status === 'current') { fill([255, 255, 255]); draw(RED); doc.setLineWidth(0.9); doc.circle(cx, y, 2.6, 'FD'); fill(RED); doc.circle(cx, y, 1.1, 'F'); }
+      else { fill([255, 255, 255]); draw([170, 170, 166]); doc.setLineWidth(0.5); doc.circle(cx, y, 2.2, 'FD'); }
+      doc.setFont('helvetica', j.status === 'current' ? 'bold' : 'normal'); doc.setFontSize(7.5); col(j.status === 'upcoming' ? MUTED : INK);
+      doc.text(j.label, cx, y + 7, { align: 'center' });
+    });
+    var ly = y + 13, lx = W / 2 - 42;
+    [[L.completed, 'completed'], [L.currentL, 'current'], [L.upcoming, 'upcoming']].forEach(function (k, i) {
+      var cx = lx + i * 30;
+      if (k[1] === 'completed') { fill(INK); doc.circle(cx, ly - 1, 1.4, 'F'); }
+      else if (k[1] === 'current') { fill([255, 255, 255]); draw(RED); doc.setLineWidth(0.7); doc.circle(cx, ly - 1, 1.6, 'FD'); }
+      else { fill([255, 255, 255]); draw([170, 170, 166]); doc.setLineWidth(0.4); doc.circle(cx, ly - 1, 1.4, 'FD'); }
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); col(MUTED); doc.text(k[0], cx + 3, ly);
+    });
+    // attendance + lms cards
+    y = 101;
+    var cw = (IW - 8) / 2;
+    card(X, y, cw, L.attendance, D.att, D.total ? D.present + ' / ' + D.total + ' ' + L.sessionsAtt : L.none);
+    card(X + cw + 8, y, cw, L.lms, D.lms, '');
+    // rating
+    y = 136; section(L.rating, y); y += 9;
+    if (D.rating != null) {
+      for (var s = 0; s < 5; s++) star(W / 2 - 22 + s * 8, y, 3.1, Math.max(0, Math.min(1, D.rating - s)));
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(16); col(INK); doc.text(num(D.rating), W / 2 + 22, y + 2, { align: 'left' });
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8); col(MUTED); doc.text(L.ratingNote, W / 2, y + 9, { align: 'center' });
+    } else { doc.setFont('helvetica', 'normal'); doc.setFontSize(10); col(MUTED); doc.text(L.noRating, W / 2, y + 2, { align: 'center' }); }
+    // table
+    y = 163; section(L.byCourse, y); y += 7;
+    var cols = [X, X + 9, X + 84, X + 120, X + IW];   // # | course | attendance | feedback | lms
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(8); col(MUTED);
+    doc.text('#', cols[0] + 1, y); doc.text(L.course.toUpperCase(), cols[1], y); doc.text(L.attendance, cols[2], y); doc.text(L.feedback.toUpperCase(), cols[3], y); doc.text(L.lms, cols[4], y, { align: 'right' });
+    y += 2.5; draw(LINE); doc.setLineWidth(0.3); doc.line(X, y, X + IW, y);
+    D.courses.forEach(function (c) {
+      y += D.courses.length > 8 ? 6.4 : 7.2;
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); col(c.started ? INK : MUTED);
+      doc.text(String(c.n), cols[0] + 1, y); doc.text(doc.splitTextToSize(c.title, cols[2] - cols[1] - 4)[0], cols[1], y);
+      miniBar(cols[2], y, c.started ? c.att : null);
+      if (c.feedback === 'yes') { check(cols[3] + 2, y - 1.2); doc.setFontSize(8); col(GOOD); doc.text(L.submitted, cols[3] + 6, y); }
+      else { doc.setFontSize(8); col(MUTED); doc.text(c.feedback === 'no' ? L.notSubmitted : L.na, cols[3], y); }
+      miniBar(cols[4] - 33, y, c.lms, true);
+      draw([240, 240, 238]); doc.setLineWidth(0.2); doc.line(X, y + 2.6, X + IW, y + 2.6);
+    });
+    // comments
+    if (comment && comment.trim()) {
+      y += 11;
+      var lines = doc.splitTextToSize(comment.trim(), IW - 10);
+      var hgt = Math.min(lines.length, 12) * 4.3 + 12;
+      if (y + hgt > 286) { doc.addPage(); y = 20; }
+      draw(LINE); doc.setLineWidth(0.3); fill([250, 250, 248]); doc.roundedRect(X, y, IW, hgt, 2, 2, 'FD');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(9); col(INK); doc.text(L.comments, X + 5, y + 6.5);
+      doc.setFont('helvetica', 'normal'); doc.setFontSize(8.8); col([50, 50, 50]); doc.text(lines.slice(0, 12), X + 5, y + 12);
+    }
+    // footer
+    var pages = doc.getNumberOfPages();
+    for (var p = 1; p <= pages; p++) {
+      doc.setPage(p); doc.setFont('helvetica', 'normal'); doc.setFontSize(7.5); col(MUTED);
+      doc.text('Adizes Institute · Adizes Executive Program', X, 290); doc.text(p + ' / ' + pages, W - X, 290, { align: 'right' });
+    }
+    return { doc: doc, filename: (lang === 'es' ? 'Reporte de avance - ' : 'Progress report - ') + D.name + '.pdf' };
+
+    function section(label, yy) {
+      fill([17, 17, 17]); doc.rect(X, yy - 4.6, IW, 6.6, 'F');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); col([255, 255, 255]); doc.text(label, W / 2, yy - 0.3, { align: 'center' });
+    }
+    function card(x, yy, w, label, v, sub) {
+      draw(LINE); doc.setLineWidth(0.3); doc.roundedRect(x, yy, w, 24, 2, 2, 'S');
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8.5); col(MUTED); doc.text(label, x + 5, yy + 7);
+      doc.setFontSize(15); col(v == null ? MUTED : (v >= 0.75 ? GOOD : v >= 0.4 ? [138, 90, 0] : RED)); doc.text(v == null ? '—' : Math.round(v * 100) + '%', x + w - 5, yy + 8, { align: 'right' });
+      fill(TRACK); doc.roundedRect(x + 5, yy + 12, w - 10, 3.4, 1.2, 1.2, 'F');
+      if (v) { fill(v >= 0.75 ? GOOD : v >= 0.4 ? [227, 160, 8] : RED); doc.roundedRect(x + 5, yy + 12, Math.max(2.4, (w - 10) * Math.min(1, v)), 3.4, 1.2, 1.2, 'F'); }
+      if (sub) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8); col(MUTED); doc.text(sub, x + 5, yy + 21); }
+    }
+    function miniBar(x, yy, v, rightPct) {
+      if (v == null) { doc.setFont('helvetica', 'normal'); doc.setFontSize(8); col(MUTED); doc.text('—', x, yy); return; }
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(8); col(INK);
+      doc.text(Math.round(v * 100) + '%', x, yy);
+      fill(TRACK); doc.rect(x + 11, yy - 2.6, 22, 2.6, 'F');
+      fill(v >= 0.75 ? GOOD : v >= 0.4 ? [227, 160, 8] : RED); if (v > 0) doc.rect(x + 11, yy - 2.6, 22 * Math.min(1, v), 2.6, 'F');
+    }
+    function check(x, yy) { draw(GOOD); doc.setLineWidth(0.7); doc.line(x - 1.4, yy, x - 0.3, yy + 1.1); doc.line(x - 0.3, yy + 1.1, x + 1.6, yy - 1.4); }
+    function star(cx, cy, r, f) {
+      var pts = []; for (var k = 0; k < 10; k++) { var a = -Math.PI / 2 + k * Math.PI / 5, rr = k % 2 ? r * 0.45 : r; pts.push([cx + rr * Math.cos(a), cy + rr * Math.sin(a)]); }
+      var poly = function (style) { var segs = pts.slice(1).map(function (p, i) { return [p[0] - pts[i][0], p[1] - pts[i][1]]; }); doc.lines(segs, pts[0][0], pts[0][1], [1, 1], style, true); };
+      fill(TRACK); draw(TRACK); poly('F');
+      if (f > 0) { fill([227, 160, 8]); draw([227, 160, 8]); if (f >= 0.99) poly('F'); else { doc.saveGraphicsState(); doc.rect(cx - r, cy - r, 2 * r * f, 2 * r, null); doc.clip(); doc.discardPath(); poly('F'); doc.restoreGraphicsState(); } }
+    }
+  });
+}
+function reportModal(ctx, email) {
+  var C = ctx.C, l = ctx.M.learner[email];
+  var lang = C.cohort.language === 'es' ? 'es' : 'en', L = REPORT_TXT[lang];
+  var T = ((S.boot.emailTemplates || {}).progressReport || {})[lang] || {};
+  var comment = textareaEl(L.defaultComment, { rows: 5 });
+  var subject = inputEl(T.subject || ''), body = textareaEl(T.body || '', { rows: 6 });
+  var make = function () { return buildReportPdf(ctx, email, comment.value); };
+  var send = function (test) {
+    return make().then(function (r) {
+      var b64 = r.doc.output('datauristring').split(',')[1];
+      return api('report.send', { cohortId: ctx.id, email: email, pdfBase64: b64, filename: r.filename, subject: subject.value, body: body.value, test: test });
+    });
+  };
+  var m = modal('Progress report · ' + fullName(l), [
+    h('p.epm-p', 'Generated with today’s data, in ' + (lang === 'es' ? 'Spanish' : 'English') + '. Generate it again any time to update it.'),
+    field('Comments for the learner (in the report)', comment),
+    h('.epm-actions', btn('Download PDF', { icon: 'down', kind: 'primary' }, function () { make().then(function (r) { r.doc.save(r.filename); }).catch(fail); }),
+      btn('Preview', { icon: 'ext', kind: 'ghost' }, function () { make().then(function (r) { window.open(r.doc.output('bloburl'), '_blank'); }).catch(fail); })),
+    h('.epm-card.epm-card-flat', h('h4', 'Email it to ' + l.email),
+      field('Subject', subject), field('Message', body, '{first} and {cohort} are filled in. The PDF goes attached.'),
+      h('.epm-actions', testBtn(send), btn('Send to the learner', { icon: 'mail', kind: 'primary' }, function () {
+        confirmBox('Send the report to ' + fullName(l) + '?', 'It goes to ' + l.email + ' with the PDF attached, and is logged in Conversations.', 'Send').then(function (ok) {
+          if (ok) send(false).then(function () { m.close(); toast('Report sent'); delete S.cohorts[ctx.id]; }).catch(fail);
+        });
+      })))], { wide: true });
+}
+
+/* ---- planner.js ---- */
+/* ===================================================================================
+ * PLANNER — general calendar for everyone + cohort design (drafts) for Program Managers
+ *   Timeline: every cohort as a row, one bar per block (course)
+ *   Month:    classic month grid with every session of every cohort
+ *   SMEs:     who teaches what and when, time off, double bookings
+ *   Drafts:   plan a new cohort (dates, order of courses, SMEs) and see conflicts live
+ * =================================================================================== */
+var PL_TABS = [['timeline', 'Timeline'], ['month', 'Month'], ['smes', 'SME availability'], ['drafts', 'Cohort drafts']];
+
+function plKey(email, name) { return email ? String(email).toLowerCase() : (name ? 'name:' + normName(name) : ''); }
+function plShortCohort(n) { return String(n || '').replace(/^cohort\s*/i, 'C').replace(/\s+/g, ' '); }
+function plShortBlock(b) { return b.kind === 'welcome' ? 'W' : b.kind === 'course' ? 'C' + b.number : b.kind === 'case_study' ? (b.number || 'CS') : b.kind === 'wrapup' ? 'END' : (b.title || '').slice(0, 6); }
+function plDays(a, b) { return Math.round((pd(b) - pd(a)) / 864e5); }
+
+// Dates for a draft: welcome blocks on the welcome date, then every module session on the chosen weekdays
+function draftSchedule(d) {
+  var blocks = (d.blocks || []).map(function (b, i) { return Object.assign({}, b, { key: b.key || 'd' + i }); });
+  var sessions = [];
+  blocks.forEach(function (b) { (b.modules || []).forEach(function (m) { for (var k = 0; k < (m.sessions || 2); k++) sessions.push({ blockKey: b.key, moduleNo: m.no || '', moduleTitle: m.title || '' }); }); });
+  var regular = sessions.filter(function (s) { return blocks.find(function (b) { return b.key === s.blockKey; }).kind !== 'welcome'; });
+  var dates = generateDates(d.firstDate, d.weekdays || [1, 3], d.skip || [], regular.length);
+  regular.forEach(function (s, i) { s.date = dates[i] || ''; });
+  sessions.forEach(function (s) { if (blocks.find(function (b) { return b.key === s.blockKey; }).kind === 'welcome') s.date = d.welcomeDate || ''; });
+  return { blocks: blocks, sessions: sessions };
+}
+
+// Rows (cohorts + drafts) with their blocks, dates and SMEs; double bookings per SME and date
+function plannerModel(P, opts) {
+  opts = opts || {};
+  var t = P.today;
+  var smeName = {}; (P.smes || []).forEach(function (s) { smeName[plKey(s.email, s.name)] = s.name; });
+  var rows = [];
+  P.cohorts.forEach(function (c) {
+    var bl = P.blocks.filter(function (b) { return b.cohortId === c.id; }).sort(function (a, b) { return a.order - b.order; });
+    var ss = P.sessions.filter(function (s) { return s.c === c.id; });
+    rows.push({ id: c.id, name: c.name, short: plShortCohort(c.name), status: c.status, draft: false, language: c.language,
+      blocks: bl.map(function (b) {
+        var bs = ss.filter(function (s) { return s.b === b.id; });
+        return { id: b.id, kind: b.kind, number: b.number, title: b.title, sme: plKey(b.smeEmail, b.smeName), smeLabel: b.smeEmail ? (smeName[b.smeEmail] || b.smeEmail) : (b.smeName || ''),
+          sessions: bs.map(function (s) { return { date: s.d, no: s.no, title: s.t, sme: plKey(s.se, s.sn) || plKey(b.smeEmail, b.smeName) }; }).sort(function (x, y) { return x.date.localeCompare(y.date); }) };
+      }) });
+  });
+  (P.drafts || []).forEach(function (d) {
+    if (opts.onlyDraft && opts.onlyDraft !== d.id) return;
+    var st = draftSchedule(d.data || {});
+    rows.push({ id: 'draft:' + d.id, draftId: d.id, name: d.name, short: d.name, status: 'Draft', draft: true,
+      blocks: st.blocks.map(function (b) {
+        return { id: b.key, kind: b.kind, number: b.number, title: b.title, sme: plKey(b.smeEmail, b.smeName), smeLabel: b.smeEmail ? (smeName[b.smeEmail] || b.smeEmail) : (b.smeName || ''),
+          sessions: st.sessions.filter(function (s) { return s.blockKey === b.key && s.date; }).map(function (s) { return { date: s.date, no: s.moduleNo, title: s.moduleTitle, sme: plKey(b.smeEmail, b.smeName) }; }) };
+      }) });
+  });
+  rows.forEach(function (r) {
+    r.blocks.forEach(function (b) { var ds = b.sessions.map(function (s) { return s.date; }); b.first = ds[0] || ''; b.last = ds[ds.length - 1] || ''; });
+    var all = r.blocks.map(function (b) { return b.first; }).concat(r.blocks.map(function (b) { return b.last; })).filter(Boolean).sort();
+    r.first = all[0] || ''; r.last = all[all.length - 1] || '';
+  });
+  // double bookings: same SME, same date, different rows (drafts compete with real cohorts)
+  var byDay = {};
+  rows.forEach(function (r) { r.blocks.forEach(function (b) { b.sessions.forEach(function (s) { if (!s.sme) return; var k = s.sme + '|' + s.date; (byDay[k] = byDay[k] || []).push({ row: r, block: b, s: s }); }); }); });
+  var clashes = [];
+  Object.keys(byDay).forEach(function (k) {
+    var list = byDay[k], ids = {}; list.forEach(function (x) { ids[x.row.id] = 1; });
+    if (Object.keys(ids).length > 1) { list.forEach(function (x) { x.s.clash = true; x.block.clash = true; }); clashes.push({ sme: k.split('|')[0], date: k.split('|')[1], items: list }); }
+  });
+  // time off
+  var off = (P.unavailability || []).map(function (u) { return Object.assign({}, u, { key: u.smeKey.indexOf('@') > 0 ? u.smeKey.toLowerCase() : 'name:' + normName(u.smeKey.replace(/^name:/, '')) }); });
+  rows.forEach(function (r) { r.blocks.forEach(function (b) { b.sessions.forEach(function (s) {
+    var o = off.find(function (u) { return u.key === s.sme && s.date >= u.from && s.date <= u.to; });
+    if (o) { s.off = o; b.off = true; }
+  }); }); });
+  return { rows: rows, clashes: clashes.sort(function (a, b) { return a.date.localeCompare(b.date); }), off: off, smeName: smeName, today: t };
+}
+
+function viewPlanner(main, r) {
+  var pm = isPM();
+  var tabs = PL_TABS.filter(function (t) { return pm || t[0] !== 'drafts'; });
+  var tab = tabs.some(function (t) { return t[0] === r.id; }) ? r.id : 'timeline';
+  main.appendChild(h('.epm-page-head', h('div', h('h1', 'Planner'), h('p.epm-sub', 'Every cohort on one calendar' + (pm ? ', SME availability and drafts to plan the next cohorts.' : ' and SME availability.'))),
+    h('.epm-actions', btn('Refresh', { icon: 'sync', kind: 'ghost' }, function () { S.planner = null; render(); }))));
+  main.appendChild(h('nav.epm-tabs', tabs.map(function (t) { return h('a.epm-tab', { href: '#/planner/' + t[0], class: t[0] === tab ? 'on' : '' }, t[1]); })));
+  var body = h('div', h('.epm-loading', 'Loading…'));
+  main.appendChild(body);
+  (S.planner ? Promise.resolve(S.planner) : api('planner.get', {}).then(function (P) { S.planner = P; return P; })).then(function (P) {
+    clear(body);
+    ({ timeline: plTimeline, month: plMonth, smes: plSmes, drafts: plDrafts })[tab](body, P, r);
+  }).catch(function (e) { clear(body); body.appendChild(empty(e.message)); });
+}
+
+/* ---------------- timeline (Gantt) ---------------- */
+function ganttChart(rows, opts) {
+  opts = opts || {};
+  var t = opts.today || today();
+  var ds = [];
+  rows.forEach(function (r) { r.bars.forEach(function (b) { if (b.first) ds.push(b.first, b.last); }); (r.extra || []).forEach(function (e) { ds.push(e.from, e.to); }); });
+  ds = ds.filter(Boolean).sort();
+  if (!ds.length) return empty('No dated sessions to show.');
+  var start = opts.from || addDays(ds[0], -7);
+  var end = opts.to || addDays(ds[ds.length - 1], 10);
+  var dayPx = opts.dayPx || 4, days = plDays(start, end) + 1, W = days * dayPx;
+  var x = function (d) { return plDays(start, d) * dayPx; };
+  var inner = h('.epm-gantt-inner', { style: { width: (W + 190) + 'px' } });
+  var head = h('.epm-gantt-head', h('.epm-gantt-label'));
+  var track = h('.epm-gantt-track', { style: { width: W + 'px' } });
+  var d0 = pd(start); d0.setUTCDate(1);
+  for (var m = iso(d0); m <= end; m = iso(new Date(Date.UTC(pd(m).getUTCFullYear(), pd(m).getUTCMonth() + 1, 1)))) {
+    if (m < start) continue;
+    track.appendChild(h('.epm-gantt-month', { style: { left: x(m) + 'px' } }, MONTHS[pd(m).getUTCMonth()] + ' ' + String(pd(m).getUTCFullYear()).slice(2)));
+  }
+  if (t >= start && t <= end) track.appendChild(h('.epm-gantt-today', { style: { left: x(t) + 'px' }, title: 'Today' }));
+  head.appendChild(track);
+  inner.appendChild(head);
+  rows.forEach(function (r) {
+    // bars that overlap in time go to separate lanes so they never cover each other
+    var lanes = [];
+    r.bars.filter(function (b) { return b.first; }).sort(function (a, b) { return a.first.localeCompare(b.first); }).forEach(function (b) {
+      var px0 = x(b.first), px1 = px0 + Math.max(6, (plDays(b.first, b.last) + 1) * dayPx);
+      var li = lanes.findIndex(function (end) { return end + 3 <= px0; });
+      if (li < 0) { li = lanes.length; lanes.push(0); }
+      lanes[li] = Math.max(px1, px0 + (b.label ? 30 : 0)); b.lane = li;
+    });
+    var nl = Math.max(1, lanes.length);
+    var tr = h('.epm-gantt-track', { style: { width: W + 'px', height: (24 + nl * 28) + 'px' } });
+    if (t >= start && t <= end) tr.appendChild(h('.epm-gantt-todayline', { style: { left: x(t) + 'px' } }));
+    (r.extra || []).forEach(function (e) {   // time off
+      if (e.to < start || e.from > end) return;
+      tr.appendChild(h('.epm-gantt-off', { style: { left: x(e.from < start ? start : e.from) + 'px', width: Math.max(6, (plDays(e.from, e.to) + 1) * dayPx) + 'px' }, title: (e.label || 'Time off') + ' · ' + fmtDate(e.from) + ' – ' + fmtDate(e.to) }, e.label || ''));
+    });
+    r.bars.forEach(function (b) {
+      if (!b.first) return;
+      var w = Math.max(6, (plDays(b.first, b.last) + 1) * dayPx);
+      var bar = h('.epm-gantt-bar', { class: 'k-' + b.kind + (r.draft || b.draft ? ' draft' : '') + (b.clash ? ' clash' : '') + (b.off ? ' off' : '') + (b.last < t ? ' past' : ''),
+        style: { left: x(b.first) + 'px', width: w + 'px', top: (12 + (b.lane || 0) * 28) + 'px' }, title: b.tip, tabindex: b.href ? '0' : null,
+        onclick: b.href ? function () { location.hash = b.href; } : null }, w > 26 ? h('span', b.label) : null);
+      (b.ticks || []).forEach(function (d) { bar.appendChild(h('i', { style: { left: (x(d) - x(b.first)) + 'px', width: Math.max(2, dayPx - 1) + 'px' } })); });
+      tr.appendChild(bar);
+    });
+    inner.appendChild(h('.epm-gantt-row', { class: r.draft ? 'draft' : '' }, h('.epm-gantt-label', { title: r.title || r.name }, h('b', r.name), r.sub ? h('small', r.sub) : null), tr));
+  });
+  var wrap = h('.epm-gantt', inner);
+  setTimeout(function () { if (t >= start && t <= end) wrap.scrollLeft = Math.max(0, x(t) - 260); }, 0);
+  return wrap;
+}
+function plBlockTip(r, b) {
+  return [r.name, blockLabel(b), b.smeLabel ? 'SME: ' + b.smeLabel : 'No SME', b.first ? fmtDate(b.first) + ' – ' + fmtDate(b.last) : '', b.sessions.length + ' sessions',
+    b.clash ? '⚠ SME teaches another cohort on the same day' : '', b.off ? '⚠ SME has time off' : ''].filter(Boolean).join('\n');
+}
+function plTimeline(el, P) {
+  var showDone = false, showDrafts = true, zoom = 4;
+  var bar = h('.epm-toolbar',
+    h('label.epm-check', h('input', { type: 'checkbox', onchange: function () { showDone = this.checked; draw(); } }), h('span', 'Show completed cohorts')),
+    isPM() ? h('label.epm-check', h('input', { type: 'checkbox', checked: true, onchange: function () { showDrafts = this.checked; draw(); } }), h('span', 'Show drafts')) : null,
+    h('.epm-spacer'), h('span.epm-small.epm-muted', 'Zoom'),
+    selectEl([{ value: 2, label: 'Year' }, { value: 4, label: 'Quarter' }, { value: 8, label: 'Month' }], 4, { 'aria-label': 'Zoom', onchange: function () { zoom = Number(this.value); draw(); } }));
+  var out = h('div'), legend = h('.epm-legend.epm-gantt-legend',
+    h('span.epm-legend-i', h('i.k-course')), 'Course', h('span.epm-legend-i', h('i.k-case_study')), 'Case study', h('span.epm-legend-i', h('i.k-welcome')), 'Welcome / wrap-up',
+    h('span.epm-legend-i', h('i.k-draft')), 'Draft', h('span.epm-legend-i', h('i.k-clash')), 'SME double-booked');
+  append(el, [bar, legend, out]);
+  function draw() {
+    clear(out);
+    var M = plannerModel(P);
+    var rows = M.rows.filter(function (r) { return r.draft ? showDrafts : (showDone || r.status !== 'Completed'); })
+      .sort(function (a, b) { return String(a.first || '9').localeCompare(String(b.first || '9')); })
+      .map(function (r) {
+        return { name: r.name, draft: r.draft, sub: r.draft ? 'Draft' : r.status + (r.first ? ' · ' + fmtDate(r.first) + ' – ' + fmtDate(r.last) : ''),
+          bars: r.blocks.map(function (b) { return { first: b.first, last: b.last, kind: b.kind, label: plShortBlock(b), clash: b.clash, off: b.off, tip: plBlockTip(r, b),
+            ticks: b.sessions.map(function (s) { return s.date; }), href: r.draft ? '#/planner/drafts/' + r.draftId : '#/c/' + r.id + '/calendar' }; }) };
+      });
+    out.appendChild(ganttChart(rows, { dayPx: zoom, today: M.today }));
+    out.appendChild(h('p.epm-small.epm-muted', 'Each bar is a course from its first to its last session; the small marks are the sessions. Hover for details, click to open the calendar.'));
+  }
+  draw();
+}
+
+/* ---------------- month grid ---------------- */
+function plMonth(el, P) {
+  var M = plannerModel(P);
+  var showDrafts = false;
+  var cur = (M.today || today()).slice(0, 7) + '-01';
+  var colors = {}; M.rows.filter(function (r) { return !r.draft; }).sort(function (a, b) { return String(a.first).localeCompare(String(b.first)); })
+    .filter(function (r) { return r.status !== 'Completed'; }).forEach(function (r, i) { colors[r.id] = SERIES[i % SERIES.length]; });
+  var title = h('h2.epm-month-title');
+  var bar = h('.epm-toolbar', btn('', { icon: 'back', kind: 'ghost', aria: 'Previous month' }, function () { move(-1); }), title,
+    btn('', { icon: 'chevron', kind: 'ghost', aria: 'Next month' }, function () { move(1); }), btn('Today', { kind: 'ghost' }, function () { cur = (M.today || today()).slice(0, 7) + '-01'; draw(); }),
+    h('.epm-spacer'), isPM() ? h('label.epm-check', h('input', { type: 'checkbox', onchange: function () { showDrafts = this.checked; draw(); } }), h('span', 'Show drafts')) : null);
+  var out = h('div');
+  append(el, [bar, out]);
+  function move(n) { var d = pd(cur); cur = iso(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + n, 1))); draw(); }
+  function draw() {
+    clear(out);
+    var d = pd(cur), y = d.getUTCFullYear(), mo = d.getUTCMonth();
+    title.textContent = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'][mo] + ' ' + y;
+    var byDay = {};
+    M.rows.forEach(function (r) {
+      if (r.draft && !showDrafts) return;
+      r.blocks.forEach(function (b) { b.sessions.forEach(function (s) { (byDay[s.date] = byDay[s.date] || []).push({ r: r, b: b, s: s }); }); });
+    });
+    var first = new Date(Date.UTC(y, mo, 1)), offset = (first.getUTCDay() + 6) % 7;
+    var startD = iso(new Date(Date.UTC(y, mo, 1 - offset)));
+    var grid = h('.epm-month', ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(function (w) { return h('.epm-month-wd', w); }));
+    for (var i = 0; i < 42; i++) {
+      var day = addDays(startD, i), inMonth = pd(day).getUTCMonth() === mo;
+      if (i >= 35 && !inMonth) break;
+      var items = (byDay[day] || []).sort(function (a, b) { return a.r.name.localeCompare(b.r.name); });
+      grid.appendChild(h('.epm-month-day', { class: (inMonth ? '' : 'out ') + (day === M.today ? 'today' : '') },
+        h('.epm-month-n', String(pd(day).getUTCDate())),
+        items.map(function (it) {
+          var tip = it.r.name + ' · ' + (it.s.no ? it.s.no + ' ' : '') + (it.s.title || it.b.title) + (it.b.smeLabel ? '\nSME: ' + it.b.smeLabel : '') + (it.s.clash ? '\n⚠ SME double-booked this day' : '') + (it.s.off ? '\n⚠ SME time off: ' + (it.s.off.note || '') : '');
+          return h(it.r.draft ? 'span.epm-mchip' : 'a.epm-mchip', { href: it.r.draft ? null : '#/c/' + it.r.id + '/calendar', title: tip,
+            class: (it.r.draft ? 'draft ' : '') + (it.s.clash || it.s.off ? 'clash' : ''), style: { borderLeftColor: colors[it.r.id] || '#9a9a96' } },
+            h('b', it.r.short), ' ', it.s.no || plShortBlock(it.b), it.b.smeLabel ? h('span', ' · ' + it.b.smeLabel.split(' ')[0]) : null);
+        })));
+    }
+    out.appendChild(h('.epm-month-wrap', grid));
+  }
+  draw();
+}
+
+/* ---------------- SME availability ---------------- */
+function plSmes(el, P) {
+  var pm = isPM(), zoom = 4;
+  var M = plannerModel(P);
+  var out = h('div');
+  var bar = h('.epm-toolbar', h('p.epm-muted', pm ? 'Who teaches what and when across every cohort (and your drafts).' : 'Your courses across cohorts. Add your time off so the Program Managers can plan around it.'),
+    h('.epm-spacer'), selectEl([{ value: 2, label: 'Year' }, { value: 4, label: 'Quarter' }, { value: 8, label: 'Month' }], 4, { 'aria-label': 'Zoom', onchange: function () { zoom = Number(this.value); draw(); } }),
+    btn('Add time off', { icon: 'plus', kind: 'primary' }, function () { offModal(P); }));
+  append(el, [bar, out]);
+  function draw() {
+    clear(out);
+    var keys = {};
+    M.rows.forEach(function (r) { if (r.status === 'Completed') return; r.blocks.forEach(function (b) { if (b.sme && b.last >= addDays(M.today, -30)) keys[b.sme] = b.smeLabel || b.sme; }); });
+    M.off.forEach(function (u) { keys[u.key] = keys[u.key] || M.smeName[u.key] || u.smeKey.replace(/^name:/, ''); });
+    if (!pm) { var me = S.user.email.toLowerCase(); Object.keys(keys).forEach(function (k) { if (k !== me) delete keys[k]; }); if (!keys[me]) keys[me] = S.user.name || me; }
+    var rows = Object.keys(keys).sort(function (a, b) { return String(keys[a]).localeCompare(String(keys[b])); }).map(function (k) {
+      var bars = [];
+      M.rows.forEach(function (r) {
+        if (r.status === 'Completed') return;
+        r.blocks.forEach(function (b) {
+          if (b.sme !== k) return;
+          bars.push({ first: b.first, last: b.last, kind: b.kind, draft: r.draft, clash: b.clash, off: b.off, label: r.short + ' ' + plShortBlock(b), tip: plBlockTip(r, b), ticks: b.sessions.map(function (s) { return s.date; }),
+            href: r.draft ? '#/planner/drafts/' + r.draftId : '#/c/' + r.id + '/calendar' });
+        });
+      });
+      return { name: keys[k], sub: k.indexOf('@') > 0 ? k : 'No account yet', bars: bars, extra: M.off.filter(function (u) { return u.key === k; }).map(function (u) { return { from: u.from, to: u.to, label: u.note || 'Time off' }; }) };
+    });
+    out.appendChild(ganttChart(rows, { dayPx: zoom, today: M.today }));
+    // double bookings
+    var clashes = M.clashes.filter(function (c) { return pm || c.sme === S.user.email.toLowerCase(); }).filter(function (c) { return c.date >= addDays(M.today, -7); });
+    out.appendChild(h('.epm-card', h('h3', 'Double bookings ', badge(String(clashes.length), clashes.length ? 'bad' : 'good')),
+      clashes.length ? h('ul.epm-risk', clashes.map(function (c) {
+        return h('li', h('span', h('b', fmtDate(c.date, true)), ' · ', keys[c.sme] || M.smeName[c.sme] || c.sme), h('span.epm-muted', c.items.map(function (x) { return x.row.short + ' ' + plShortBlock(x.block); }).join(' and ')));
+      })) : h('p.epm-muted', 'No SME is teaching two cohorts on the same day.')));
+    // time off
+    var offs = M.off.filter(function (u) { return pm || u.key === S.user.email.toLowerCase(); }).sort(function (a, b) { return a.from.localeCompare(b.from); });
+    out.appendChild(h('.epm-card', h('h3', 'Time off'), offs.length ? h('.epm-table-wrap', h('table.epm-table.epm-table-sm', h('thead', h('tr', h('th', 'SME'), h('th', 'From'), h('th', 'To'), h('th', 'Note'), h('th', ''))),
+      h('tbody', offs.map(function (u) {
+        return h('tr', h('td', keys[u.key] || M.smeName[u.key] || u.smeKey), h('td', fmtDate(u.from)), h('td', fmtDate(u.to)), h('td.epm-small', u.note || ''),
+          h('td', btn('', { icon: 'trash', kind: 'ghost', aria: 'Delete' }, function () {
+            confirmBox('Delete this time off?', fmtDate(u.from) + ' – ' + fmtDate(u.to), 'Delete', true).then(function (ok) { if (ok) api('unavail.delete', { id: u.id }).then(function () { S.planner = null; render(); }).catch(fail); });
+          })));
+      })))) : h('p.epm-muted', 'No time off registered.')));
+  }
+  draw();
+}
+function offModal(P) {
+  var pm = isPM();
+  var who = pm ? selectEl((P.smes || []).filter(function (s) { return s.role === 'SME' || !s.email; }).map(function (s) { return { value: s.email || s.key, label: s.name }; }), '') : null;
+  var from = inputEl(today(), { type: 'date' }), to = inputEl(today(), { type: 'date' }), note = inputEl('', { placeholder: 'Vacation, conference…' });
+  var m = modal('Add time off', [pm ? field('SME', who) : h('p.epm-p', 'For ', h('b', S.user.name || S.user.email)), h('.epm-row2', field('From', from), field('To', to)), field('Note', note)], {
+    footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Save', { kind: 'primary' }, function () {
+      api('unavail.save', { record: { smeKey: pm ? who.value : S.user.email, from: from.value, to: to.value, note: note.value } }).then(function () { m.close(); S.planner = null; render(); }).catch(fail);
+    })],
+  });
+}
+
+/* ---------------- drafts (design a new cohort) ---------------- */
+function plDrafts(el, P, r) {
+  var drafts = (P.drafts || []).slice().sort(function (a, b) { return String(b.updatedAt).localeCompare(String(a.updatedAt)); });
+  var selId = r.tab || (drafts[0] && drafts[0].id) || '';
+  var list = h('.epm-dlist',
+    btn('New draft', { icon: 'plus', kind: 'primary' }, function () {
+      var B = S.boot;
+      var st = templateStructure(B.template);
+      var data = { language: 'en', welcomeDate: '', firstDate: '', weekdays: [1, 3], skip: [], blocks: draftBlocksFrom(st) };
+      api('draft.save', { draft: { name: 'New cohort draft', data: data } }).then(function (res) { S.planner = null; go('planner/drafts/' + res.id); }).catch(fail);
+    }),
+    drafts.map(function (d) { return h('a.epm-dlist-i', { href: '#/planner/drafts/' + d.id, class: d.id === selId ? 'on' : '' }, h('b', d.name), h('small', 'Updated ' + fmtDateTime(d.updatedAt))); }));
+  var editor = h('.epm-deditor');
+  el.appendChild(h('.epm-drafts', list, editor));
+  var d = drafts.find(function (x) { return x.id === selId; });
+  if (!d) { editor.appendChild(empty('Create a draft to plan a cohort: choose the dates, reorder the courses, assign SMEs and check who is available. Drafts never affect real cohorts until you create the cohort.')); return; }
+  draftEditor(editor, P, d);
+}
+// Draft blocks keep modules (title + number of sessions) so dates can be recalculated
+function draftBlocksFrom(st) {
+  var byKey = {}; st.blocks.forEach(function (b, i) { byKey[b.key] = { key: 'd' + i, kind: b.kind, number: b.number, title: b.title, smeEmail: b.smeEmail || '', smeName: b.smeName || '', modules: [] }; });
+  st.sessions.forEach(function (s) {
+    var b = byKey[s.blockKey]; if (!b) return;
+    var last = b.modules[b.modules.length - 1];
+    if (last && last.no === (s.moduleNo || '') && last.title === (s.moduleTitle || '')) last.sessions++;
+    else b.modules.push({ no: s.moduleNo || '', title: s.moduleTitle || '', sessions: 1 });
+  });
+  return st.blocks.map(function (b) { return byKey[b.key]; });
+}
+function draftEditor(el, P, d) {
+  var data = JSON.parse(JSON.stringify(d.data || {}));
+  data.blocks = data.blocks || []; data.weekdays = data.weekdays || [1, 3]; data.skip = data.skip || [];
+  var dirty = false;
+  var name = inputEl(d.name, { oninput: function () { dirty = true; } });
+  var lang = selectEl([{ value: 'en', label: 'English' }, { value: 'es', label: 'Spanish' }], data.language || 'en', { onchange: function () { data.language = this.value; dirty = true; } });
+  var welcome = inputEl(data.welcomeDate, { type: 'date', onchange: function () { data.welcomeDate = this.value; update(); } });
+  var first = inputEl(data.firstDate, { type: 'date', onchange: function () { data.firstDate = this.value; update(); } });
+  var days = h('.epm-checks', [1, 2, 3, 4, 5, 6].map(function (n) { return h('label.epm-check', h('input', { type: 'checkbox', value: String(n), checked: data.weekdays.indexOf(n) >= 0, onchange: function () {
+    data.weekdays = Array.prototype.slice.call(days.querySelectorAll('input:checked')).map(function (i) { return Number(i.value); }); update(); } }), h('span', WD[n])); }));
+  var skip = textareaEl(data.skip.join('\n'), { rows: 2, placeholder: 'Holiday weeks: one date per line (YYYY-MM-DD)', onchange: function () { data.skip = this.value.split(/\s+/).filter(Boolean); update(); } });
+  var source = selectEl([{ value: '', label: 'Replace the courses with…' }, { value: 'template', label: 'The default program template' }, { value: 'csv', label: 'A program calendar CSV (keeps its dates)' }]
+    .concat(P.cohorts.slice().sort(function (a, b) { return String(b.startDate).localeCompare(String(a.startDate)); }).map(function (c) { return { value: c.id, label: 'The structure of ' + c.name }; })), '');
+  var csvIn = h('input', { type: 'file', accept: '.csv,text/csv', style: { display: 'none' } });
+  source.addEventListener('change', function () {
+    var v = source.value; if (!v) return;
+    if (v === 'csv') { csvIn.click(); source.value = ''; return; }
+    (v === 'template' ? Promise.resolve(templateStructure(S.boot.template)) : loadCohort(v).then(copyStructure)).then(function (st) { data.blocks = draftBlocksFrom(st); source.value = ''; update(); }).catch(fail);
+  });
+  csvIn.addEventListener('change', function () {
+    readCalendarFile(csvIn).then(function (st) {
+      data.blocks = draftBlocksFrom(st);
+      var ds = st.sessions.map(function (s) { return s.date; }).filter(Boolean).sort();
+      var wel = st.sessions.find(function (s) { return st.blocks.find(function (b) { return b.key === s.blockKey; }).kind === 'welcome'; });
+      data.welcomeDate = wel ? wel.date : ''; data.firstDate = st.sessions.filter(function (s) { return s !== wel; }).map(function (s) { return s.date; }).sort()[0] || ds[0];
+      var wds = {}; st.sessions.forEach(function (s) { if (s !== wel && s.date) wds[pd(s.date).getUTCDay()] = 1; }); data.weekdays = Object.keys(wds).map(Number).slice(0, 3);
+      welcome.value = data.welcomeDate; first.value = data.firstDate;
+      Array.prototype.forEach.call(days.querySelectorAll('input'), function (i) { i.checked = data.weekdays.indexOf(Number(i.value)) >= 0; });
+      toast('Courses loaded from the CSV. Dates follow the first date and the session days; add the holiday weeks.');
+      update();
+    }).catch(fail);
+    csvIn.value = '';
+  });
+  var tableBox = h('div'), conflictBox = h('div'), timelineBox = h('div');
+  var saveBtn = btn('Save draft', { kind: 'primary' }, save);
+  append(el, [
+    h('.epm-card', h('.epm-card-head', h('h3', 'Draft'), h('.epm-actions', btn('Delete', { icon: 'trash', kind: 'danger-ghost' }, del), saveBtn)),
+      h('.epm-row2', field('Name', name), field('Language', lang)),
+      h('.epm-row3', field('Welcome session', welcome), field('First module session', first), field('Session days', days)),
+      field('Weeks without sessions', skip), h('.epm-row2', source, csvIn)),
+    h('.epm-card', h('.epm-card-head', h('h3', 'Courses, dates and SMEs'), btn('Add course', { icon: 'plus', kind: 'ghost' }, function () {
+      data.blocks.push({ key: 'n' + Date.now(), kind: 'course', number: '', title: 'New course', smeEmail: '', smeName: '', modules: [{ no: '', title: '', sessions: 2 }] }); update(); })), tableBox),
+    conflictBox, timelineBox,
+    h('.epm-card', h('h3', 'Create the cohort'), h('p.epm-small.epm-muted', 'Creates a real cohort (status Planned) with these courses, dates and SMEs. The draft stays here for reference.'),
+      btn('Create cohort from this draft', { icon: 'check', kind: 'primary' }, createCohort))]);
+  function update() { dirty = true; saveBtn.classList.add('epm-pulse'); draw(); }
+  function draw() {
+    var sched = draftSchedule(data);
+    var Pm = Object.assign({}, P, { drafts: [{ id: d.id, name: name.value || d.name, data: data }] });
+    var M = plannerModel(Pm, { onlyDraft: d.id });
+    var row = M.rows.find(function (x) { return x.draft; });
+    // table
+    clear(tableBox);
+    var renum = function () { var c = 0, cs = 0; data.blocks.forEach(function (b) { if (b.kind === 'course') b.number = String(++c); else if (b.kind === 'case_study') b.number = 'CS' + (++cs); }); };
+    tableBox.appendChild(h('.epm-table-wrap', h('table.epm-table.epm-table-sm.epm-dtable', h('thead', h('tr', h('th', ''), h('th', 'Course'), h('th', 'SME'), h('th.num', 'Weeks'), h('th', 'Dates'), h('th', 'Checks'), h('th', ''))),
+      h('tbody', data.blocks.map(function (b, i) {
+        var rb = row.blocks[i] || { sessions: [] };
+        var weeks = (b.modules || []).length;
+        var checks = [];
+        if (rb.clash) checks.push(badge('Double-booked', 'bad'));
+        if (rb.off) checks.push(badge('SME time off', 'bad'));
+        if (!b.smeEmail && !b.smeName && b.kind !== 'welcome' && b.kind !== 'wrapup') checks.push(badge('No SME', 'mid'));
+        // other cohorts in the same weeks with the same SME (different days): heads-up only
+        var busy = M.rows.filter(function (x) { return !x.draft && x.status !== 'Completed'; }).some(function (x) { return x.blocks.some(function (ob) { return ob.sme && ob.sme === rb.sme && ob.first && rb.first && ob.first <= rb.last && ob.last >= rb.first; }); });
+        if (busy && !rb.clash) checks.push(badge('Teaching another cohort these weeks', 'info'));
+        if (!checks.length && rb.first) checks.push(badge('OK', 'good'));
+        return h('tr', { class: rb.clash || rb.off ? 'epm-row-bad' : '' },
+          h('td', h('span.epm-block-no', b.kind === 'course' ? b.number : b.kind === 'case_study' ? 'CS' : b.kind === 'welcome' ? 'W' : '·')),
+          h('td', inputEl(b.title, { 'aria-label': 'Title', oninput: function () { b.title = this.value; dirty = true; } }),
+            h('div.epm-small.epm-muted', selectEl([['course', 'Course'], ['case_study', 'Case study'], ['welcome', 'Welcome'], ['wrapup', 'Wrap-up'], ['other', 'Other']].map(function (k) { return { value: k[0], label: k[1] }; }), b.kind,
+              { 'aria-label': 'Kind', class: 'epm-input-sm', onchange: function () { b.kind = this.value; renum(); update(); } }))),
+          h('td', selectEl(smeOptions('No SME'), smeValue(b), { 'aria-label': 'SME', onchange: function () { applySme(b, this.value); update(); } })),
+          h('td.num', inputEl(weeks, { type: 'number', min: '1', max: '12', style: { width: '64px' }, 'aria-label': 'Weeks', onchange: function () {
+            var n = Math.max(1, Math.min(12, Number(this.value) || 1)), per = b.kind === 'welcome' ? 1 : 2;
+            b.modules = b.modules || [];
+            while (b.modules.length < n) b.modules.push({ no: '', title: '', sessions: per });
+            b.modules.length = n; update(); } })),
+          h('td.epm-nowrap.epm-small', rb.first ? fmtDate(rb.first) + ' – ' + fmtDate(rb.last) : h('span.epm-muted', 'Choose the dates')),
+          h('td', checks),
+          h('td.epm-nowrap', btn('', { icon: 'up', kind: 'ghost', aria: 'Move up', disabled: i === 0 }, function () { data.blocks.splice(i - 1, 0, data.blocks.splice(i, 1)[0]); renum(); update(); }),
+            btn('', { icon: 'down', kind: 'ghost', aria: 'Move down', disabled: i === data.blocks.length - 1 }, function () { data.blocks.splice(i + 1, 0, data.blocks.splice(i, 1)[0]); renum(); update(); }),
+            btn('', { icon: 'trash', kind: 'ghost', aria: 'Remove' }, function () { data.blocks.splice(i, 1); renum(); update(); })));
+      })))));
+    var ds = sched.sessions.map(function (s) { return s.date; }).filter(Boolean).sort();
+    tableBox.appendChild(h('p.epm-small.epm-muted', data.blocks.length + ' blocks · ' + sched.sessions.length + ' sessions' + (ds.length ? ' · ' + fmtDate(ds[0]) + ' → ' + fmtDate(ds[ds.length - 1]) : '') +
+      ' · Weeks = modules (two sessions each, one for the welcome).'));
+    // conflicts detail
+    clear(conflictBox);
+    var mine = M.clashes.filter(function (c) { return c.items.some(function (x) { return x.row.draft; }); });
+    var offs = []; row.blocks.forEach(function (b) { b.sessions.forEach(function (s) { if (s.off) offs.push({ b: b, s: s }); }); });
+    conflictBox.appendChild(h('.epm-card', h('h3', 'Availability checks ', badge(String(mine.length + offs.length), mine.length + offs.length ? 'bad' : 'good')),
+      mine.length + offs.length ? h('ul.epm-risk', mine.map(function (c) {
+        var other = c.items.filter(function (x) { return !x.row.draft; }).map(function (x) { return x.row.name + ' (' + plShortBlock(x.block) + ')'; }).join(', ');
+        var me = c.items.find(function (x) { return x.row.draft; });
+        return h('li', h('span', h('b', fmtDate(c.date, true)), ' · ', me.block.smeLabel, ' · ', me.block.title), h('span.epm-muted', 'Also teaching ' + other));
+      }).concat(offs.map(function (o) { return h('li', h('span', h('b', fmtDate(o.s.date, true)), ' · ', o.b.smeLabel, ' · ', o.b.title), h('span.epm-muted', 'Time off' + (o.s.off.note ? ': ' + o.s.off.note : ''))); })))
+        : h('p.epm-muted', row.first ? 'Every SME is free on their dates.' : 'Choose the welcome and first module dates to check availability.')));
+    // timeline: this draft next to the cohorts it overlaps
+    clear(timelineBox);
+    if (row.first) {
+      var rows = M.rows.filter(function (x) { return x.draft || (x.status !== 'Completed' && x.last >= row.first && x.first <= row.last); }).map(function (x) {
+        return { name: x.draft ? (name.value || 'Draft') : x.name, draft: x.draft, sub: x.draft ? 'Draft' : x.status,
+          bars: x.blocks.map(function (b) { return { first: b.first, last: b.last, kind: b.kind, label: plShortBlock(b) + (b.smeLabel ? ' · ' + b.smeLabel.split(' ')[0] : ''), clash: b.clash, off: b.off, tip: plBlockTip(x, b), ticks: b.sessions.map(function (s) { return s.date; }) }; }) };
+      });
+      timelineBox.appendChild(h('.epm-card', h('h3', 'Next to the other cohorts'), ganttChart(rows, { dayPx: 4, today: M.today })));
+    }
+  }
+  function save() {
+    data.language = lang.value;
+    return api('draft.save', { draft: { id: d.id, name: name.value, data: data } }).then(function () { dirty = false; saveBtn.classList.remove('epm-pulse'); toast('Draft saved'); S.planner = null; }).catch(fail);
+  }
+  function del() {
+    confirmBox('Delete “' + d.name + '”?', 'Only the draft is deleted; cohorts are not affected.', 'Delete', true).then(function (ok) {
+      if (ok) api('draft.delete', { id: d.id }).then(function () { S.planner = null; go('planner/drafts'); }).catch(fail);
+    });
+  }
+  function createCohort() {
+    var sched = draftSchedule(data);
+    if (!data.firstDate) return toast('Choose the first module date', 'error');
+    var nm = inputEl(name.value.replace(/draft/i, '').trim());
+    var m = modal('Create the cohort', [field('Cohort name', nm), h('p.epm-small.epm-muted', sched.blocks.length + ' blocks and ' + sched.sessions.length + ' sessions, in ' + (data.language === 'es' ? 'Spanish' : 'English') + '.')], {
+      footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Create', { kind: 'primary' }, function () {
+        var blocks = sched.blocks.map(function (b) { return { key: b.key, kind: b.kind, number: b.number, title: b.title, smeEmail: b.smeEmail, smeName: b.smeName, smeSeesFeedback: true }; });
+        var ds = sched.sessions.map(function (s) { return s.date; }).filter(Boolean).sort();
+        api('cohort.create', { data: { name: nm.value, language: data.language || 'en', startDate: ds[0] || '', status: 'Planned', notes: 'Created from the draft “' + (name.value || d.name) + '”' },
+          structure: { blocks: blocks, sessions: sched.sessions } }).then(function (res) { m.close(); toast('Cohort created'); S.planner = null; refreshBoot().then(function () { go('c/' + res.id + '/settings'); }); }).catch(fail);
+      })],
+    });
+  }
+  draw();
+  window.addEventListener('beforeunload', function (e) { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+}
+
 /* ---- app.js ---- */
 /* ===================================================================================
  * STAFF APP — shell, sign-in, cohorts list & wizard, learner panel, global pages
@@ -1439,7 +2372,7 @@ function shell() {
   var root = document.getElementById(ROOT_ID);
   resetRoot(root);
   var pm = isPM();
-  var nav = pm ? [['cohorts', 'Cohorts'], ['learners', 'Learners'], ['smes', 'SMEs'], ['team', 'Team'], ['settings', 'Settings']] : [['cohorts', 'My cohorts'], ['smes', 'My ratings']];
+  var nav = pm ? [['cohorts', 'Cohorts'], ['planner', 'Planner'], ['learners', 'Learners'], ['smes', 'SMEs'], ['team', 'Team'], ['settings', 'Settings']] : [['cohorts', 'My cohorts'], ['planner', 'Planner'], ['smes', 'My ratings']];
   var r = route();
   var active = r.name === 'c' ? 'cohorts' : r.name;
   var header = h('header.epm-top',
@@ -1464,7 +2397,7 @@ function render() {
   }
   var main = shell();
   var r = route();
-  var views = { cohorts: viewCohorts, c: viewCohort, learners: viewLearners, smes: viewSmes, team: viewTeam, settings: viewSettings };
+  var views = { cohorts: viewCohorts, c: viewCohort, planner: viewPlanner, learners: viewLearners, smes: viewSmes, team: viewTeam, settings: viewSettings };
   var fn = views[r.name] || viewCohorts;
   if (!isPM() && ['learners', 'team', 'settings'].indexOf(r.name) >= 0) fn = viewCohorts;
   fn(main, r);
@@ -1540,7 +2473,10 @@ function newCohortWizard() {
   var name = inputEl('', { placeholder: 'Cohort 8' }), code = inputEl('', { placeholder: 'C-AEP-108-27' });
   var lang = selectEl([{ value: 'en', label: 'English' }, { value: 'es', label: 'Spanish' }], 'en');
   var bundle = inputEl('', { placeholder: 'e.g. 783728' }), zoom = inputEl('', { placeholder: 'https://zoom.us/j/…' });
-  var source = selectEl([{ value: 'template', label: 'Default program template (' + B.template.length + ' blocks)' }].concat(B.cohorts.map(function (c) { return { value: c.id, label: 'Copy structure from ' + c.name }; })), 'template');
+  var source = selectEl([{ value: 'csv', label: 'Import the program calendar (CSV)' }, { value: 'template', label: 'Default program template (' + B.template.length + ' blocks)' }].concat(B.cohorts.map(function (c) { return { value: c.id, label: 'Copy structure from ' + c.name }; })), 'csv');
+  var calFile = h('input', { type: 'file', accept: '.csv,text/csv' });
+  var calField = field('Calendar CSV', calFile, 'In the Calendar sheet: File → Download → CSV. Dates, courses, modules and SMEs come from the file.');
+  var dateFields;
   var welcome = inputEl('', { type: 'date' }), first = inputEl('', { type: 'date' });
   var days = h('.epm-checks', [1, 2, 3, 4, 5, 6].map(function (d) { return h('label.epm-check', h('input', { type: 'checkbox', value: String(d), checked: d === 1 || d === 3 }), h('span', WD[d])); }));
   var skip = textareaEl('', { rows: 3, placeholder: 'Holiday weeks: one date per line (YYYY-MM-DD). The whole week is skipped.' });
@@ -1548,6 +2484,14 @@ function newCohortWizard() {
   var structure = null;
   function buildStructure() {
     var wd = Array.prototype.slice.call(days.querySelectorAll('input:checked')).map(function (i) { return Number(i.value); });
+    var csv = source.value === 'csv';
+    calField.style.display = csv ? '' : 'none';
+    if (dateFields) dateFields.forEach(function (f) { f.style.display = csv ? 'none' : ''; });
+    if (csv) {
+      if (!calFile.files[0]) { preview.textContent = 'Choose the calendar CSV.'; return Promise.resolve(null); }
+      return readCalendarFile(calFile).then(function (st) { structure = st; preview.textContent = structureSummary(st); return st; })
+        .catch(function (e) { preview.textContent = e.message; throw e; });
+    }
     var getSrc = source.value === 'template' ? Promise.resolve(templateStructure(B.template)) : loadCohort(source.value).then(copyStructure);
     return getSrc.then(function (st) {
       var regular = st.sessions.filter(function (s) { return st.blocks.find(function (b) { return b.key === s.blockKey; }).kind !== 'welcome'; });
@@ -1560,20 +2504,23 @@ function newCohortWizard() {
       return st;
     });
   }
-  [source, welcome, first, skip].forEach(function (x) { x.addEventListener('change', function () { buildStructure().catch(fail); }); });
+  [source, welcome, first, skip, calFile].forEach(function (x) { x.addEventListener('change', function () { buildStructure().catch(function () {}); }); });
   days.addEventListener('change', function () { buildStructure().catch(fail); });
-  buildStructure();
+  var row1 = h('.epm-row2', field('Welcome session date', welcome), field('First module session', first)), fDays = field('Session days', days), fSkip = field('Weeks without sessions', skip);
+  dateFields = [row1, fDays, fSkip];
+  buildStructure().catch(function () {});
   var m = modal('New cohort', [
     h('.epm-row3', field('Name', name), field('Code', code), field('Language', lang, 'All learner emails and forms use this language.')),
     h('.epm-row2', field('Teachable bundle ID', bundle), field('Zoom link', zoom)),
-    field('Structure', source, 'You can edit blocks, titles, SMEs and dates afterwards in the cohort Settings.'),
-    h('.epm-row2', field('Welcome session date', welcome), field('First module session', first)),
-    field('Session days', days), field('Weeks without sessions', skip), preview], {
+    field('Structure', source, 'You can edit blocks, titles, SMEs and dates afterwards in the cohort Settings.'), calField,
+    row1, fDays, fSkip, preview], {
     wide: true,
     footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Create cohort', { kind: 'primary' }, function () {
       if (!name.value.trim()) return toast('Give the cohort a name', 'error');
       buildStructure().then(function (st) {
-        return api('cohort.create', { data: { name: name.value, code: code.value, language: lang.value, startDate: welcome.value || first.value, teachableBundleId: bundle.value, zoomLink: zoom.value, status: 'Planned' }, structure: st });
+        if (!st) throw new Error('Choose the calendar CSV (or another structure)');
+        var ds = st.sessions.map(function (s) { return s.date; }).filter(Boolean).sort();
+        return api('cohort.create', { data: { name: name.value, code: code.value, language: lang.value, startDate: welcome.value || first.value || ds[0] || '', teachableBundleId: bundle.value, zoomLink: zoom.value, status: 'Planned' }, structure: st });
       }).then(function (r) { m.close(); toast('Cohort created'); return refreshBoot().then(function () { go('c/' + r.id + '/settings'); }); }).catch(fail);
     })],
   });
@@ -1582,7 +2529,7 @@ function templateStructure(tpl) {
   var blocks = [], sessions = [];
   tpl.forEach(function (b, i) {
     var key = 'b' + i;
-    blocks.push({ key: key, kind: b.kind, number: b.number, title: b.title, smeName: b.smeName || '', smeEmail: matchSmeEmail(b.smeName) });
+    blocks.push({ key: key, kind: b.kind, number: b.number, title: b.title, smeName: b.smeName || '', smeEmail: matchSmeEmail(b.smeName), smeSeesFeedback: true });
     b.modules.forEach(function (mo) { for (var k = 0; k < (mo.sessions || 2); k++) sessions.push({ blockKey: key, moduleNo: mo.no, moduleTitle: mo.title }); });
   });
   return { blocks: blocks, sessions: sessions };
@@ -1615,6 +2562,7 @@ function learnerDrawer(ctx, email) {
   var nav = h('.epm-subtabs');
   var pane = h('div');
   append(body, [
+    pm ? h('.epm-actions.epm-drawer-actions', btn('Progress report (PDF)', { icon: 'down', kind: 'ghost' }, function () { reportModal(ctx, email); })) : null,
     h('.epm-drawer-sum', statusBadge(e.status, e), h('span', 'Attendance ', pctCell(st.att)), h('span', 'LMS ', pctCell(st.lms)), st.exp != null ? h('span', 'Rating ' + num(st.exp) + '/5') : null,
       st.risk.length ? badge('Needs attention', 'bad') : null),
     nav, pane]);
@@ -1648,11 +2596,13 @@ function learnerDrawer(ctx, email) {
           var patch = { profile: prof.getValues() }; Object.keys(F).forEach(function (k) { patch[k] = F[k].value; });
           saveLearner(patch).then(function (r) { m.close(); delete S.cohorts[ctx.id]; go('c/' + ctx.id + '/learners/' + encodeURIComponent(r.email)); }).catch(fail);
         })),
-        h('.epm-card.epm-card-flat', h('h4', 'Personal profile link'), h('p.epm-small.epm-muted', l.profileSubmittedAt ? 'Completed on ' + fmtDateTime(l.profileSubmittedAt) + '. The learner can open it again to update.' : 'Not completed yet.'),
+        h('.epm-card.epm-card-flat', h('h4', 'Registration form'), h('p.epm-small.epm-muted', l.profileSubmittedAt ? 'Registered on ' + fmtDateTime(l.profileSubmittedAt) + '. Answering again with the same email updates the data.' : 'Not registered yet.'),
+          h('.epm-actions', btn('Copy their link', { icon: 'copy', kind: 'ghost', title: 'The cohort registration link with their email filled in' }, function () {
+            var u = ctx.C.registrationLink; copyText(u ? u + (u.indexOf('?') >= 0 ? '&' : '?') + 'e=' + encodeURIComponent(email) : '');
+          }), btn('Email the form', { icon: 'mail', kind: 'ghost' }, function () { m.close(); emailComposer(ctx, [email], 'registration'); }))),
+        h('.epm-card.epm-card-flat', h('h4', 'Goals & intentions link'), h('p.epm-small.epm-muted', 'Personal link where the learner answers the Goals & intentions questions.'),
           h('.epm-actions', btn('Copy link', { icon: 'copy', kind: 'ghost' }, function () { copyText(l.profileLink); }),
-            btn('Email the link', { icon: 'mail', kind: 'ghost' }, function () {
-              api('learner.sendProfileLink', { cohortId: ctx.id, email: email }).then(function () { toast('Link sent and logged'); delete S.cohorts[ctx.id]; }).catch(fail);
-            })))]);
+            btn('Email the link', { icon: 'mail', kind: 'ghost' }, function () { m.close(); emailComposer(ctx, [email], 'goals'); })))]);
     }
     if (cur === 'program') {
       var status = selectEl(O.enrollmentStatus.concat(O.enrollmentStatus.indexOf(e.status) < 0 ? [e.status] : []), e.status), wes = h('input', { type: 'checkbox', checked: !!e.welcomeEmailSent });
@@ -1664,7 +2614,11 @@ function learnerDrawer(ctx, email) {
       append(pane, [
         h('.epm-row2', field('Status in ' + C.cohort.name, status), sinceField),
         h('.epm-row2', field('Certification sent', cert), h('span')),
-        h('.epm-row2', field('Welcome kit sent', kit), field('Books code', books)),
+        h('.epm-row2', field('Welcome kit sent', kit), field('Books code', h('.epm-inline', books,
+          btn('', { icon: 'mail', kind: 'ghost', aria: 'Email the books code', title: 'Email the books code to the learner' }, function () {
+            if (books.value.trim() !== (l.booksCode || '')) return toast('Save the books code first', 'error');
+            booksCodeEmail(ctx, l);
+          })))),
         h('label.epm-check', wes, h('span', 'Welcome email sent')),
         (setTimeout(syncSince, 0), null),
         h('.epm-actions', btn('Save', { kind: 'primary' }, function () {
@@ -1863,8 +2817,11 @@ function viewSettings(main) {
   main.appendChild(h('.epm-card', h('h3', 'Integrations'),
     h('ul.epm-int', h('li', I.teachable ? badge('Connected', 'good') : badge('Not configured', 'bad'), ' Teachable — progress syncs every night for Active cohorts, or from each cohort’s LMS tab.'),
       h('li', I.typeform ? badge('Connected', 'good') : badge('Not configured', 'bad'), ' Typeform — responses are pulled every night. Last pull: ' + (st.typeformLastSync ? fmtDateTime(st.typeformLastSync) : 'never'),
-        I.typeform ? h('span', ' ', btn('Pull now', { icon: 'sync', kind: 'ghost' }, function () { api('typeform.sync', {}).then(function (r) { toast(r.imported + ' new responses'); S.cohorts = {}; }).catch(fail); })) : null)),
+        I.typeform ? h('span', ' ', btn('Pull now', { icon: 'sync', kind: 'ghost' }, function () { api('typeform.sync', {}).then(function (r) { toast(r.imported + ' new responses'); S.cohorts = {}; }).catch(fail); })) : null),
+      h('li', I.sender && I.sender.ok ? badge('OK', 'good') : badge('Wrong account', 'bad'), ' Emails leave from ', h('b', I.sender ? I.sender.from : '—'),
+        I.sender && !I.sender.ok ? h('div.epm-small.epm-t-low', 'The Apps Script runs as ' + I.sender.runsAs + '. Redeploy it signed in as ' + I.sender.from + ' (Deploy → New deployment, Execute as: Me) — nothing is sent until then.') : null)),
     h('p.epm-small.epm-muted', 'Keys are stored in the Apps Script project (Project Settings → Script Properties), never in this page.')));
+  main.appendChild(templatesCard());
   // import
   var files = h('input', { type: 'file', accept: '.json,application/json', multiple: true });
   var replace = h('input', { type: 'checkbox' });
@@ -1893,73 +2850,110 @@ function viewSettings(main) {
 
 /* ---- learner.js ---- */
 /* ===================================================================================
- * LEARNER FORM — personal link (?t=…): profile + goals & intentions, in the cohort language
+ * LEARNER PAGES (no login), in the cohort language
+ *   ?c=<cohort token>[&e=email] → registration form (all personal data)
+ *   ?t=<personal token>          → Goals & intentions
  * =================================================================================== */
 var LT = {
   en: {
-    title: 'Your participant profile', intro: 'Help us prepare your experience in the Adizes Executive Program. It takes about 10 minutes; you can come back to this link to update your answers.',
+    regTitle: 'Registration', regIntro: 'Please complete your registration for the Adizes Executive Program. Fields marked * are required. If you already registered, sending the form again with the same email updates your data.',
+    goalsTitle: 'Goals and intentions', goalsIntro: 'Help us prepare your experience in the Adizes Executive Program. It takes about 10 minutes; you can come back to this link to update your answers.',
     about: 'About you', first: 'First name', last: 'Last name', email: 'Email', company: 'Company', job: 'Job title', profile: 'Which describes you best?', profileHint: 'Choose all that apply.',
-    birthday: 'Birthday', phone: 'Phone (WhatsApp)', linkedin: 'LinkedIn profile', address: 'Mailing address for your welcome kit', addressHint: 'Street, number, city, postal code, country.',
-    goals: 'Goals and intentions', save: 'Save my profile', saving: 'Saving…', done: 'Thank you! Your profile is saved.', doneSub: 'You can open this link again any time to update it.',
-    again: 'Edit my answers', required: 'Please write your first name.', updated: 'Last updated', loading: 'Loading…', cohort: 'Cohort',
+    birthday: 'Birthday', phone: 'Phone (WhatsApp)', linkedin: 'LinkedIn profile', address: 'Mailing address', addressHint: 'Street, number, city, postal code, country.',
+    save: 'Send', saving: 'Sending…', regDone: 'Thank you! Your registration is complete.', regDoneSub: 'We will be in touch with the next steps.',
+    done: 'Thank you! Your answers are saved.', doneSub: 'You can open this link again any time to update them.', again: 'Edit my answers',
+    required: 'Please complete the required fields', updated: 'Last updated', cohort: 'Cohort', optional: 'optional',
   },
   es: {
-    title: 'Tu perfil de participante', intro: 'Ayúdanos a preparar tu experiencia en el Adizes Executive Program. Toma unos 10 minutos; puedes volver a este enlace para actualizar tus respuestas.',
+    regTitle: 'Inscripción', regIntro: 'Completa tu inscripción al Adizes Executive Program. Los campos con * son obligatorios. Si ya te inscribiste, enviar el formulario de nuevo con el mismo correo actualiza tus datos.',
+    goalsTitle: 'Objetivos e intenciones', goalsIntro: 'Ayúdanos a preparar tu experiencia en el Adizes Executive Program. Toma unos 10 minutos; puedes volver a este enlace para actualizar tus respuestas.',
     about: 'Sobre ti', first: 'Nombre', last: 'Apellidos', email: 'Correo', company: 'Empresa', job: 'Puesto', profile: '¿Qué te describe mejor?', profileHint: 'Elige todas las que apliquen.',
-    birthday: 'Fecha de nacimiento', phone: 'Teléfono (WhatsApp)', linkedin: 'Perfil de LinkedIn', address: 'Dirección de envío para tu kit de bienvenida', addressHint: 'Calle, número, ciudad, código postal y país.',
-    goals: 'Objetivos e intenciones', save: 'Guardar mi perfil', saving: 'Guardando…', done: '¡Gracias! Tu perfil quedó guardado.', doneSub: 'Puedes abrir este enlace cuando quieras para actualizarlo.',
-    again: 'Editar mis respuestas', required: 'Escribe tu nombre, por favor.', updated: 'Última actualización', loading: 'Cargando…', cohort: 'Generación',
+    birthday: 'Fecha de nacimiento', phone: 'Teléfono (WhatsApp)', linkedin: 'Perfil de LinkedIn', address: 'Dirección postal', addressHint: 'Calle, número, ciudad, código postal y país.',
+    save: 'Enviar', saving: 'Enviando…', regDone: '¡Gracias! Tu inscripción quedó completa.', regDoneSub: 'Te contactaremos con los siguientes pasos.',
+    done: '¡Gracias! Tus respuestas quedaron guardadas.', doneSub: 'Puedes abrir este enlace cuando quieras para actualizarlas.', again: 'Editar mis respuestas',
+    required: 'Completa los campos obligatorios', updated: 'Última actualización', cohort: 'Generación', optional: 'opcional',
   },
 };
 var PROFILE_ES = { 'Senior Executive': 'Alta dirección', 'Startup Founder': 'Fundador(a) de startup', 'Board Member': 'Miembro de consejo', 'Consultant': 'Consultor(a)', 'Scholar': 'Académico(a)', 'Independent Professionals': 'Profesional independiente', 'HR Manager': 'Recursos Humanos' };
 
-function learnerApp(root) {
-  var t = new URLSearchParams(location.search).get('t') || (location.hash.match(/t=([^&]+)/) || [])[1] || '';
-  clear(root).appendChild(h('.epm-lf', h('.epm-loading.epm-center', '…')));
-  api('learner.get', { t: t }, { noToken: true }).then(function (d) { learnerForm(root, d, t); })
-    .catch(function (e) { clear(root).appendChild(h('.epm-lf', h('.epm-lf-card', h('.epm-lf-head', h('img', { src: (CFG.assets || ASSETS) + 'adizes-logo-white.png', alt: 'Adizes', width: '110' })), h('.epm-lf-body', h('p', e.message))))); });
+function learnerShell(root, L, title, cohortName, content) {
+  var card = h('.epm-lf-card',
+    h('.epm-lf-head', h('img', { src: (CFG.assets || ASSETS) + 'adizes-logo-white.png', alt: 'Adizes Institute', width: '110', height: '37' }), h('span', 'Adizes Executive Program')),
+    h('.epm-lf-body', title ? h('h1', title) : null, cohortName ? h('p.epm-muted', L.cohort + ': ' + cohortName) : null, content));
+  clear(root).appendChild(h('.epm-lf', card));
+  return card;
+}
+function learnerError(root, e) {
+  learnerShell(root, LT.en, '', '', h('p', e.message));
 }
 
-function learnerForm(root, d, token) {
-  var L = LT[d.lang] || LT.en, p = d.profile || {};
+function learnerApp(root) {
+  var q = new URLSearchParams(location.search);
+  var c = q.get('c'), t = q.get('t') || (location.hash.match(/t=([^&]+)/) || [])[1] || '';
+  clear(root).appendChild(h('.epm-lf', h('.epm-loading.epm-center', '…')));
+  if (c) return api('reg.get', { c: c, e: q.get('e') || '' }, { noToken: true }).then(function (d) { registrationForm(root, d, c); }).catch(function (e) { learnerError(root, e); });
+  api('learner.get', { t: t }, { noToken: true }).then(function (d) { goalsForm(root, d, t); }).catch(function (e) { learnerError(root, e); });
+}
+
+function registrationForm(root, d, token) {
+  var L = LT[d.lang] || LT.en, p = d.prefill || {};
+  var req = function (label) { return label + ' *'; };
   var F = {
-    firstName: inputEl(p.firstName, { autocomplete: 'given-name', required: true }), lastName: inputEl(p.lastName, { autocomplete: 'family-name' }),
-    company: inputEl(p.company, { autocomplete: 'organization' }), jobTitle: inputEl(p.jobTitle, { autocomplete: 'organization-title' }),
-    birthday: inputEl(p.birthday, { type: 'date', autocomplete: 'bday' }), phone: inputEl(p.phone, { type: 'tel', autocomplete: 'tel' }),
+    firstName: inputEl(p.firstName, { autocomplete: 'given-name', required: true }), lastName: inputEl(p.lastName, { autocomplete: 'family-name', required: true }),
+    email: inputEl(p.email, { type: 'email', autocomplete: 'email', required: true }),
+    company: inputEl(p.company, { autocomplete: 'organization', required: true }), jobTitle: inputEl(p.jobTitle, { autocomplete: 'organization-title', required: true }),
+    birthday: inputEl(p.birthday, { type: 'date', autocomplete: 'bday', required: true }), phone: inputEl(p.phone, { type: 'tel', autocomplete: 'tel', required: true }),
     linkedin: inputEl(p.linkedin, { type: 'url', placeholder: 'https://www.linkedin.com/in/…' }), address: textareaEl(p.address, { rows: 2, autocomplete: 'street-address' }),
   };
   var prof = h('.epm-checks', d.profileOptions.map(function (o) { return h('label.epm-check', h('input', { type: 'checkbox', value: o, checked: (p.profile || []).indexOf(o) >= 0 }), h('span', d.lang === 'es' ? (PROFILE_ES[o] || o) : o)); }));
-  var goals = d.questions.map(function (q, i) { return textareaEl(d.goals[i], { rows: 3 }); });
+  var hp = h('input', { type: 'text', name: 'website', tabindex: '-1', autocomplete: 'off', 'aria-hidden': 'true', class: 'epm-hp' });
   var msg = h('p.epm-lf-msg', { role: 'status' });
-  var form = h('form.epm-lf-form', { onsubmit: submit },
+  var form = h('form.epm-lf-form', { onsubmit: submit, novalidate: true },
     h('h2', L.about),
-    h('.epm-row2', field(L.first, F.firstName), field(L.last, F.lastName)),
-    field(L.email, inputEl(p.email, { disabled: true })),
-    h('.epm-row2', field(L.company, F.company), field(L.job, F.jobTitle)),
-    field(L.profile, prof, L.profileHint),
-    h('.epm-row2', field(L.birthday, F.birthday), field(L.phone, F.phone)),
-    field(L.linkedin, F.linkedin), field(L.address, F.address, L.addressHint),
-    h('h2', L.goals),
-    d.questions.map(function (q, i) { return field((i + 1) + '. ' + q, goals[i]); }),
-    msg,
-    h('button.epm-btn.epm-btn-primary.epm-btn-lg', { type: 'submit' }, L.save));
-  var card = h('.epm-lf-card',
-    h('.epm-lf-head', h('img', { src: (CFG.assets || ASSETS) + 'adizes-logo-white.png', alt: 'Adizes Institute', width: '110', height: '37' }), h('span', 'Adizes Executive Program')),
-    h('.epm-lf-body', h('h1', L.title), d.cohort ? h('p.epm-muted', L.cohort + ': ' + d.cohort) : null, h('p', L.intro),
-      d.submittedAt ? h('p.epm-small.epm-muted', L.updated + ': ' + new Date(d.submittedAt).toLocaleDateString(d.lang)) : null, form));
-  clear(root).appendChild(h('.epm-lf', card));
+    h('.epm-row2', field(req(L.first), F.firstName), field(req(L.last), F.lastName)),
+    field(req(L.email), F.email),
+    h('.epm-row2', field(req(L.company), F.company), field(req(L.job), F.jobTitle)),
+    field(req(L.profile), prof, L.profileHint),
+    h('.epm-row2', field(req(L.birthday), F.birthday), field(req(L.phone), F.phone)),
+    field(L.linkedin + ' (' + L.optional + ')', F.linkedin), field(L.address + ' (' + L.optional + ')', F.address, L.addressHint),
+    hp, msg, h('button.epm-btn.epm-btn-primary.epm-btn-lg', { type: 'submit' }, L.save));
+  var card = learnerShell(root, L, L.regTitle, d.cohort, [h('p', L.regIntro), form]);
   document.documentElement.lang = d.lang;
   function submit(e) {
     e.preventDefault();
-    if (!F.firstName.value.trim()) { msg.textContent = L.required; F.firstName.focus(); return; }
-    var btnEl = form.querySelector('button[type=submit]'); btnEl.disabled = true; btnEl.textContent = L.saving; msg.textContent = '';
-    var profile = {}; Object.keys(F).forEach(function (k) { profile[k] = F[k].value; });
+    var profile = {}; Object.keys(F).forEach(function (k) { profile[k] = F[k].value.trim(); });
     profile.profile = Array.prototype.slice.call(prof.querySelectorAll('input:checked')).map(function (i) { return i.value; });
-    api('learner.save', { t: token, profile: profile, goals: goals.map(function (g) { return g.value; }) }, { noToken: true }).then(function () {
+    var bad = (d.required || []).filter(function (k) { return !profile[k]; });
+    Object.keys(F).forEach(function (k) { F[k].classList.toggle('epm-invalid', bad.indexOf(k) >= 0); });
+    prof.classList.toggle('epm-invalid', !profile.profile.length);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(profile.email)) { bad.push('email'); F.email.classList.add('epm-invalid'); }
+    if (bad.length || !profile.profile.length) { msg.textContent = L.required; var f = form.querySelector('.epm-invalid'); if (f && f.focus) f.focus(); return; }
+    var b = form.querySelector('button[type=submit]'); b.disabled = true; b.textContent = L.saving; msg.textContent = '';
+    api('reg.save', { c: token, profile: profile, hp: hp.value }, { noToken: true }).then(function () {
+      clear(card.lastChild).appendChild(h('.epm-lf-done', h('.epm-lf-check', icon('check', 28)), h('h1', L.regDone), h('p', L.regDoneSub)));
+      window.scrollTo(0, 0);
+    }).catch(function (err) { msg.textContent = /missing/.test(err.code || '') ? L.required : err.message; b.disabled = false; b.textContent = L.save; });
+  }
+}
+
+function goalsForm(root, d, token) {
+  var L = LT[d.lang] || LT.en;
+  var goals = d.questions.map(function (q, i) { return textareaEl(d.goals[i], { rows: 3 }); });
+  var msg = h('p.epm-lf-msg', { role: 'status' });
+  var form = h('form.epm-lf-form', { onsubmit: submit },
+    d.questions.map(function (q, i) { return field((i + 1) + '. ' + q, goals[i]); }), msg,
+    h('button.epm-btn.epm-btn-primary.epm-btn-lg', { type: 'submit' }, L.save));
+  var card = learnerShell(root, L, L.goalsTitle, d.cohort, [h('p', (d.firstName ? d.firstName + ', ' : '') + L.goalsIntro),
+    d.submittedAt ? h('p.epm-small.epm-muted', L.updated + ': ' + new Date(d.submittedAt).toLocaleDateString(d.lang)) : null, form]);
+  document.documentElement.lang = d.lang;
+  function submit(e) {
+    e.preventDefault();
+    var b = form.querySelector('button[type=submit]'); b.disabled = true; b.textContent = L.saving; msg.textContent = '';
+    api('learner.save', { t: token, goals: goals.map(function (g) { return g.value; }) }, { noToken: true }).then(function () {
       clear(card.lastChild).appendChild(h('.epm-lf-done', h('.epm-lf-check', icon('check', 28)), h('h1', L.done), h('p', L.doneSub),
         h('button.epm-btn.epm-btn-ghost', { type: 'button', onclick: function () { learnerApp(root); } }, L.again)));
       window.scrollTo(0, 0);
-    }).catch(function (err) { msg.textContent = err.message; btnEl.disabled = false; btnEl.textContent = L.save; });
+    }).catch(function (err) { msg.textContent = err.message; b.disabled = false; b.textContent = L.save; });
   }
 }
 
@@ -1971,7 +2965,7 @@ var ASSETS = 'https://cdn.jsdelivr.net/gh/Adizes/exec-program-manager@v' + VERSI
 
 function injectStyles() {
   if (document.getElementById('epm-styles')) return;
-  var st = document.createElement('style'); st.id = 'epm-styles'; st.textContent = ".epm-root {\n--red: #d7141a; --red-d: #b00f14; --red-soft: #fdecec;\n--ink: #141414; --ink-2: #3a3a3a; --muted: #6e6e6e; --line: #e5e5e3; --line-2: #f0f0ee;\n--bg: #f6f6f4; --white: #ffffff; --black: #111111;\n--good: #1d7a35; --good-bg: #e6f3e9; --mid: #8a5a00; --mid-bg: #fff3d6; --low: #b3141a; --low-bg: #fbe6e6;\n--info: #1f5fae; --info-bg: #e7effa; --violet: #5b3fb8; --violet-bg: #eeeafb;\n--r: 8px; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 6px 20px rgba(0,0,0,.06);\nfont-family: Montserrat, system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;\nfont-size: 14px; line-height: 1.5; color: var(--ink); background: var(--bg);\nmin-height: 100vh; text-align: left; -webkit-font-smoothing: antialiased; position: relative;\n}\n.epm-root *, .epm-root *::before, .epm-root *::after { box-sizing: border-box; }\n.epm-root :where(h1, h2, h3, h4) { font-family: inherit; color: var(--ink); margin: 0; letter-spacing: -0.01em; line-height: 1.25; text-transform: none; }\n.epm-root :where(h1) { font-size: 26px; font-weight: 800; }\n.epm-root :where(h2) { font-size: 18px; font-weight: 700; }\n.epm-root :where(h3) { font-size: 15px; font-weight: 700; }\n.epm-root :where(h4) { font-size: 13px; font-weight: 700; margin: 14px 0 6px; }\n.epm-root :where(p) { margin: 0 0 8px; font-size: inherit; }\n.epm-root :where(a) { color: inherit; text-decoration: none; }\n.epm-root :where(img) { max-width: 100%; display: block; }\n.epm-root :where(button, input, select, textarea) { font: inherit; color: inherit; letter-spacing: normal; text-transform: none; margin: 0; border-radius: 0; }\n.epm-root :where(label) { display: inline; font-weight: inherit; margin: 0; }\n.epm-root ul, .epm-root ol { margin: 0 !important; padding: 0 !important; list-style: none !important; }\n.epm-root li { list-style: none !important; background-image: none !important; padding-left: 0; margin-left: 0; }\n.epm-root li::before { content: none !important; }\n.epm-root li::marker { content: '' !important; }\n.epm-root ol.epm-xkey { padding-left: 22px !important; list-style: decimal !important; }\n.epm-root ol.epm-xkey li { list-style: decimal !important; }\n.epm-root ol.epm-xkey li::marker { content: counter(list-item) '. ' !important; }\n.epm-root :where(table) { font-size: inherit; }\n.epm-root [hidden] { display: none !important; }\n.epm-root :focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }\n.epm-progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 100; background: transparent; overflow: hidden; pointer-events: none; }\n.epm-progress.on::after { content: ''; position: absolute; left: -40%; width: 40%; height: 100%; background: var(--red); animation: epm-load 1s ease-in-out infinite; }\n@keyframes epm-load { to { left: 100%; } }\n.epm-top { background: var(--black); color: #fff; display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 60px; border-bottom: 3px solid var(--red); position: sticky; top: 0; z-index: 20; }\n.epm-brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 14px; color: #fff !important; white-space: nowrap; }\n.epm-brand img { height: 26px; width: auto; }\n.epm-brand span { border-left: 1px solid #444; padding-left: 12px; }\n.epm-nav { display: flex; gap: 2px; flex: 1; overflow-x: auto; scrollbar-width: none; }\n.epm-nav a { color: #c9c9c9 !important; padding: 8px 12px; border-radius: 6px; font-weight: 600; font-size: 13px; white-space: nowrap; }\n.epm-nav a:hover { color: #fff !important; background: #222; }\n.epm-nav a.on { color: #fff !important; background: #262626; box-shadow: inset 0 -2px 0 var(--red); }\n.epm-me { display: flex; align-items: center; gap: 8px; }\n.epm-me-name { display: flex; flex-direction: column; align-items: flex-end; font-size: 12px; font-weight: 600; line-height: 1.2; }\n.epm-me-name small { color: #9a9a9a; font-weight: 500; }\n.epm-main { max-width: 1280px; margin: 0 auto; padding: 28px 24px 80px; }\n.epm-page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }\n.epm-sub { color: var(--muted); margin: 4px 0 0 !important; }\n.epm-crumb { display: inline-flex; align-items: center; gap: 4px; color: var(--muted) !important; font-size: 12px; font-weight: 600; margin-bottom: 6px; }\n.epm-crumb:hover { color: var(--red) !important; }\n.epm-h2 { margin: 26px 0 12px !important; font-size: 13px !important; text-transform: uppercase !important; letter-spacing: .08em !important; color: var(--muted) !important; }\n.epm-h3 { margin: 22px 0 10px !important; }\n.epm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--white); color: var(--ink); font-weight: 600; font-size: 13px; cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, color .15s; }\n.epm-btn:hover { border-color: #cfcfcc; background: #fafafa; }\n.epm-btn:disabled { opacity: .5; cursor: not-allowed; }\n.epm-btn-primary { background: var(--red); border-color: var(--red); color: #fff; }\n.epm-btn-primary:hover { background: var(--red-d); border-color: var(--red-d); }\n.epm-btn-ghost { background: transparent; border-color: transparent; }\n.epm-btn-ghost:hover { background: var(--line-2); border-color: transparent; }\n.epm-btn-ghost-inv { background: transparent; border-color: transparent; color: #ddd; }\n.epm-btn-ghost-inv:hover { background: #262626; color: #fff; border-color: transparent; }\n.epm-btn-danger { background: var(--low); border-color: var(--low); color: #fff; }\n.epm-btn-danger-ghost { background: transparent; border-color: transparent; color: var(--low); }\n.epm-btn-danger-ghost:hover { background: var(--low-bg); }\n.epm-btn-block { width: 100%; min-height: 44px; }\n.epm-btn-lg { min-height: 48px; padding: 0 24px; font-size: 15px; }\n.epm-btn .epm-ic { flex: none; }\n.epm-pulse { box-shadow: 0 0 0 4px rgba(215,20,26,.18); }\n.epm-link { background: none; border: 0; padding: 0; color: var(--red) !important; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }\n.epm-link:hover { text-decoration: underline; }\n.epm-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }\n.epm-page-head .epm-actions { margin-top: 0; }\n.epm-spacer { flex: 1; }\n.epm-card { background: var(--white); border: 1px solid var(--line); border-radius: var(--r); padding: 18px 20px; margin-bottom: 16px; }\n.epm-card > h3 { margin-bottom: 12px; }\n.epm-card-flat { background: var(--bg); border-style: dashed; margin-top: 16px; }\n.epm-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }\n.epm-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }\n.epm-ccard { display: block; background: var(--white); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; transition: border-color .15s, box-shadow .15s, transform .15s; }\n.epm-ccard:hover { border-color: #cfcfcc; box-shadow: var(--shadow); transform: translateY(-1px); }\n.epm-ccard-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 2px; }\n.epm-ccard-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; border-top: 1px solid var(--line-2); padding-top: 12px; margin-top: 10px; }\n.epm-ccard-kpis div { display: flex; flex-direction: column; }\n.epm-ccard-kpis b { font-size: 16px; font-weight: 700; }\n.epm-ccard-kpis span { font-size: 11px; color: var(--muted); }\n.epm-progressbar { height: 4px; border-radius: 2px; background: var(--line-2); margin: 12px 0 4px; overflow: hidden; }\n.epm-progressbar i { display: block; height: 100%; background: var(--black); }\n.epm-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }\n.epm-grid2 > .epm-card { margin-bottom: 0; }\n.epm-grid2 { margin-bottom: 16px; }\n.epm-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }\n.epm-kpi { background: var(--white); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; position: relative; overflow: hidden; }\n.epm-kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--line); }\n.epm-kpi-good::before { background: var(--good); } .epm-kpi-mid::before { background: #e3a008; } .epm-kpi-low::before { background: var(--low); }\n.epm-kpi-v { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1; }\n.epm-kpi-l { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-top: 4px; }\n.epm-kpi-s { font-size: 11px; color: var(--muted); }\n.epm-next-date { font-size: 22px; font-weight: 800; margin-bottom: 4px; }\n.epm-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; scrollbar-width: thin; }\n.epm-tab { padding: 10px 14px; font-weight: 600; font-size: 13px; color: var(--muted) !important; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }\n.epm-tab:hover { color: var(--ink) !important; }\n.epm-tab.on { color: var(--ink) !important; border-bottom-color: var(--red); }\n.epm-subtabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }\n.epm-subtabs a { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); font-weight: 600; font-size: 12px; color: var(--ink-2) !important; background: var(--white); cursor: pointer; }\n.epm-subtabs a.on { background: var(--black); border-color: var(--black); color: #fff !important; }\n.epm-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }\n.epm-toolbar .epm-input { width: auto; min-width: 180px; }\n.epm-toolbar p { margin: 0; }\n.epm-table-wrap { overflow-x: auto; background: var(--white); border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 12px; max-width: 100%; }\n.epm-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }\n.epm-table th { text-align: left; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--line); background: #fbfbfa; white-space: nowrap; position: sticky; top: 0; z-index: 1; }\n.epm-table td { padding: 10px 12px; border-bottom: 1px solid var(--line-2); vertical-align: top; }\n.epm-table tbody tr:last-child td { border-bottom: 0; }\n.epm-table .num { text-align: right; white-space: nowrap; }\n.epm-table-sm td, .epm-table-sm th { padding: 7px 10px; }\n.epm-table-click tbody tr { cursor: pointer; }\n.epm-table-click tbody tr:hover td { background: #fafaf8; }\n.epm-table tr.epm-clickable { cursor: pointer; }\n.epm-table tr.epm-clickable:hover td { background: #fafaf8; }\n.epm-table tr.epm-dim td { opacity: .55; }\n.epm-table tfoot td { font-weight: 700; border-top: 1px solid var(--line); background: #fbfbfa; }\n.epm-sticky { position: sticky; left: 0; background: var(--white); z-index: 2; min-width: 170px; }\nth.epm-sticky { background: #fbfbfa; z-index: 3; }\n.epm-nowrap { white-space: nowrap; }\n.epm-small { font-size: 12px; }\n.epm-muted { color: var(--muted); }\n.epm-pct { display: inline-block; min-width: 48px; text-align: center; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 12px; }\n.epm-t-good { color: var(--good); } .epm-t-mid { color: var(--mid); } .epm-t-low { color: var(--low); } .epm-t-none { color: var(--muted); }\n.epm-pct.epm-t-good { background: var(--good-bg); } .epm-pct.epm-t-mid { background: var(--mid-bg); } .epm-pct.epm-t-low { background: var(--low-bg); }\n.epm-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 1.5; background: var(--line-2); color: var(--ink-2); white-space: nowrap; margin: 1px 2px 1px 0; vertical-align: middle; }\n.epm-badge-good { background: var(--good-bg); color: var(--good); } .epm-badge-bad { background: var(--low-bg); color: var(--low); }\n.epm-badge-mid { background: var(--mid-bg); color: var(--mid); } .epm-badge-info { background: var(--info-bg); color: var(--info); }\n.epm-badge-violet { background: var(--violet-bg); color: var(--violet); } .epm-badge-dark { background: var(--black); color: #fff; }\n.epm-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; margin: 2px 4px 2px 0; }\n.epm-chip:hover { border-color: var(--red); }\n.epm-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); }\n.epm-dot-good { background: var(--good); } .epm-dot-bad { background: var(--low); } .epm-dot-info { background: var(--info); } .epm-dot-violet { background: var(--violet); } .epm-dot-dark { background: var(--black); }\n.epm-att-wrap { max-height: 70vh; }\n.epm-att-table th, .epm-att-table td { padding: 0; }\n.epm-att-table td.epm-sticky, .epm-att-table th.epm-sticky { padding: 6px 10px; }\n.epm-att-table td.num, .epm-att-table th.num { padding: 6px 8px; }\n.epm-att-h { text-align: center !important; min-width: 44px; font-size: 10px !important; letter-spacing: 0 !important; top: 33px !important; }\n.epm-att-h small { display: block; color: var(--ink-2); font-weight: 600; }\n.epm-att-hb { border: 0; background: none; padding: 6px 2px; cursor: pointer; width: 100%; font-weight: 700; color: inherit; font-size: 10px; text-transform: uppercase; }\n.epm-att-hb:hover { color: var(--red); }\n.epm-group { text-align: center !important; border-left: 1px solid var(--line); background: #f3f3f1 !important; color: var(--ink) !important; padding: 6px 4px !important; }\n.epm-att { text-align: center; border-left: 1px solid #dddcd7; }\n.epm-att-table tbody td, .epm-att-table tfoot td { border-bottom: 1px solid #e3e2dd; }\n.epm-att-table .epm-att-h { border-left: 1px solid #dddcd7; }\n.epm-att-table .epm-gstart { border-left: 2px solid #8f8f8a !important; }\n.epm-att-table .epm-group { border-left: 2px solid #8f8f8a; }\n.epm-att.na { background: repeating-linear-gradient(135deg, #f7f7f5, #f7f7f5 4px, #efefec 4px, #efefec 8px); }\n.epm-att.na span { color: #a3a39e; cursor: default; }\n.epm-att button, .epm-att span { width: 100%; min-height: 34px; border: 0; background: transparent; cursor: pointer; font-weight: 700; font-size: 12px; color: #b5b5b5; display: block; line-height: 34px; }\n.epm-att.p { background: var(--good-bg); } .epm-att.p button, .epm-att.p span { color: var(--good); }\n.epm-att.a { background: var(--low-bg); } .epm-att.a button, .epm-att.a span { color: var(--low); }\n.epm-att button:hover { box-shadow: inset 0 0 0 2px var(--ink); }\n.epm-block { padding: 0; overflow: hidden; }\n.epm-block .epm-table-wrap { border: 0; border-radius: 0; margin: 0; }\n.epm-block-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: #fbfbfa; flex-wrap: wrap; }\n.epm-block-no { display: inline-block; min-width: 28px; margin-right: 8px; padding: 1px 6px; border-radius: 4px; background: var(--black); color: #fff; font-size: 12px; font-weight: 700; text-align: center; }\n.epm-block-no:empty { display: none; }\ntr.epm-done td:first-child { color: var(--muted); }\n.epm-cal { table-layout: fixed; min-width: 760px; }\n.epm-cal td { overflow-wrap: anywhere; }\n.epm-rec { margin-right: 10px; }\ntr.epm-break td { background: repeating-linear-gradient(135deg, #fafaf8, #fafaf8 6px, #f2f2ef 6px, #f2f2ef 12px); color: var(--muted); font-size: 12px; font-weight: 600; text-align: center; }\n.epm-chart { position: relative; }\n.epm-chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }\n.epm-chart-head h4 { margin: 0; font-size: 14px; }\n.epm-chart-body { position: relative; }\n.epm-svg { display: block; width: 100%; height: auto; overflow: visible; }\n.epm-grid { stroke: #ececea; stroke-width: 1; }\n.epm-axis { fill: var(--muted); font-size: 11px; font-family: inherit; }\n.epm-cross { stroke: #9a9a9a; stroke-width: 1; stroke-dasharray: 3 3; }\n.epm-tip { position: absolute; display: none; background: var(--black); color: #fff; padding: 8px 10px; border-radius: 6px; font-size: 12px; pointer-events: none; min-width: 140px; max-width: 260px; z-index: 5; box-shadow: var(--shadow); }\n.epm-tip-t { color: #bbb; margin-bottom: 4px; font-size: 11px; }\n.epm-tip-r { display: flex; align-items: center; gap: 6px; }\n.epm-tip-r i { width: 12px; height: 2px; display: inline-block; }\n.epm-tip-r b { font-weight: 700; }\n.epm-tip-r span { color: #ccc; }\n.epm-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 8px; font-size: 12px; color: var(--ink-2); }\n.epm-legend-i { display: inline-flex; align-items: center; gap: 6px; }\n.epm-legend-i i { width: 14px; height: 2px; display: inline-block; border-radius: 1px; }\n.epm-bars { display: flex; flex-direction: column; gap: 6px; }\n.epm-bar-row { display: grid; grid-template-columns: minmax(120px, 34%) 1fr 90px; gap: 10px; align-items: center; font-size: 12px; }\n.epm-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.epm-bar-track { height: 12px; background: var(--line-2); border-radius: 0 4px 4px 0; overflow: hidden; }\n.epm-bar-fill { height: 100%; border-radius: 0 4px 4px 0; }\n.epm-bar-val { font-weight: 700; }\n.epm-bar-val small { color: var(--muted); font-weight: 500; }\n.epm-xkey { columns: 2; column-gap: 24px; font-size: 12px; color: var(--ink-2); margin-top: 10px !important; }\n.epm-xkey li { margin-bottom: 2px; break-inside: avoid; }\n.epm-risk { list-style: none; }\n.epm-risk li { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; flex-wrap: wrap; }\n.epm-risk a { font-weight: 600; } .epm-risk a:hover { color: var(--red); }\n.epm-timeline { list-style: none; margin-top: 12px !important; }\n.epm-timeline li { display: grid; grid-template-columns: 74px 1fr auto; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; align-items: start; }\n.epm-tl-date { color: var(--muted); font-size: 12px; font-weight: 600; }\n.epm-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; min-width: 0; }\n.epm-label { font-size: 12px; font-weight: 600; color: var(--ink-2); }\n.epm-hint { font-size: 11px; color: var(--muted); }\n.epm-input { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid #d6d6d2; border-radius: 6px; background: var(--white); font-size: 14px; color: var(--ink); margin: 0; box-shadow: none; }\ntextarea.epm-input { resize: vertical; min-height: 60px; line-height: 1.45; }\n.epm-input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(17,17,17,.08); }\n.epm-input:disabled, .epm-input[readonly] { background: #f4f4f2; color: var(--ink-2); }\nselect.epm-input { padding-right: 28px; }\n.epm-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }\n.epm-row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: start; }\n.epm-row4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }\n.epm-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }\n.epm-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; margin: 0; font-weight: 500; }\n.epm-check input { width: 16px; height: 16px; accent-color: var(--red); margin: 0; }\n.epm-scale { display: flex; flex-wrap: wrap; gap: 4px; }\n.epm-scale-b { width: 38px; height: 34px; border: 1px solid #d6d6d2; border-radius: 6px; background: var(--white); cursor: pointer; font-weight: 700; }\n.epm-scale-b.on { background: var(--black); border-color: var(--black); color: #fff; }\n.epm-stack { display: flex; flex-direction: column; gap: 8px; }\n.epm-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }\n.epm-row3 > .epm-btn { align-self: center; }\n.epm-rows .epm-row3 { grid-template-columns: 1.4fr 1fr 1fr auto; }\n.epm-picker { border: 1px solid var(--line); border-radius: 6px; padding: 10px; }\n.epm-picker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; max-height: 200px; overflow: auto; margin-top: 8px; }\n.epm-check-all { padding-bottom: 6px; border-bottom: 1px solid var(--line-2); width: 100%; }\n.epm-p { margin-bottom: 12px !important; }\n.epm-sblock { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 10px; overflow: hidden; }\n.epm-sblock-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px; background: #f7f7f5; border-bottom: 1px solid var(--line); }\n.epm-sblock-head .epm-input { width: auto; }\n.epm-sblock-head .epm-input[aria-label=\"Title\"] { flex: 1; min-width: 200px; }\n.epm-sblock-btns { display: flex; margin-left: auto; }\n.epm-srows { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }\n.epm-srow { display: grid; grid-template-columns: 150px 70px 1fr 180px auto; gap: 6px; align-items: center; }\n.epm-srow .epm-input { min-height: 34px; padding: 5px 8px; font-size: 13px; }\n.epm-danger-zone { border-color: #f1c4c5; }\n.epm-overlay { position: fixed; inset: 0; background: rgba(17,17,17,.45); z-index: 1000; display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; animation: epm-fade .15s; }\n.epm-overlay-drawer { justify-content: flex-end; padding: 0; align-items: stretch; }\n@keyframes epm-fade { from { opacity: 0; } }\n.epm-modal { background: var(--white); border-radius: 10px; width: 100%; max-width: 560px; box-shadow: 0 20px 60px rgba(0,0,0,.25); display: flex; flex-direction: column; max-height: none; font-family: Montserrat, system-ui, sans-serif; font-size: 14px; color: var(--ink); }\n.epm-modal-wide { max-width: 880px; }\n.epm-drawer { max-width: 720px; border-radius: 0; min-height: 100vh; animation: epm-slide .2s ease-out; }\n@keyframes epm-slide { from { transform: translateX(40px); opacity: 0; } }\n.epm-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--white); z-index: 2; border-radius: 10px 10px 0 0; }\n.epm-modal-head h3 { font-size: 17px; font-weight: 800; }\n.epm-modal-body { padding: 18px 20px; }\n.epm-modal-foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; padding: 14px 20px; border-top: 1px solid var(--line); position: sticky; bottom: 0; background: var(--white); border-radius: 0 0 10px 10px; }\n.epm-drawer-sum { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; font-size: 13px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line-2); }\n.epm-dl { display: grid; grid-template-columns: 120px 1fr; gap: 8px 12px; margin: 0; }\n.epm-dl dt { color: var(--muted); font-size: 12px; font-weight: 600; } .epm-dl dd { margin: 0; }\n.epm-details { background: var(--white); border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 8px; padding: 0 14px; }\n.epm-details summary { padding: 12px 0; cursor: pointer; font-size: 13px; list-style-position: inside; }\n.epm-details[open] summary { border-bottom: 1px solid var(--line-2); margin-bottom: 10px; }\n.epm-details .epm-table-wrap { margin-bottom: 14px; }\n.epm-qa { padding: 6px 0 12px; }\n.epm-q { font-size: 12px; font-weight: 700; color: var(--ink-2); margin-bottom: 2px; }\n.epm-a { white-space: pre-wrap; font-size: 13px; }\n.epm-lms-sec { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 6px; }\n.epm-lms { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }\n.epm-lms-row { display: grid; grid-template-columns: 112px 1fr auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 6px; font-size: 13px; color: var(--ink-2); background: #fafaf8; }\n.epm-lms-row.ok { color: var(--ink); background: var(--good-bg); }\n.epm-lms-pill { display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: #e9e9e5; color: #6b6b66; }\n.epm-lms-row.ok .epm-lms-pill { background: var(--good); color: #fff; }\n.epm-lms-count { font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #ececea; color: var(--ink-2); letter-spacing: 0; text-transform: none; }\n.epm-lms-count.all { background: var(--good-bg); color: var(--good); } .epm-lms-count.some { background: var(--mid-bg); color: var(--mid); }\n.epm-defreeze { display: inline-flex; gap: 6px; align-items: flex-start; } .epm-defreeze .epm-ic { flex: none; margin-top: 2px; color: var(--muted); }\n.epm-status { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; } .epm-status small { font-size: 11px; color: var(--muted); }\n.epm-int { list-style: none; } .epm-int li { padding: 6px 0; }\n.epm-log { list-style: none; margin-top: 10px !important; font-size: 13px; } .epm-log li { padding: 3px 0; }\n.epm-toasts { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 2000; align-items: center; width: max-content; max-width: calc(100vw - 32px); }\n.epm-toast { background: var(--black); color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow); transition: opacity .3s, transform .3s; max-width: 640px; }\n.epm-toast-error { background: var(--low); }\n.epm-toast.out { opacity: 0; transform: translateY(8px); }\n.epm-empty { text-align: center; padding: 36px 16px; color: var(--muted); background: var(--white); border: 1px dashed var(--line); border-radius: var(--r); }\n.epm-empty p { margin-bottom: 12px !important; }\n.epm-loading { color: var(--muted); padding: 24px 0; font-weight: 600; }\n.epm-center { text-align: center; padding-top: 30vh; }\n.epm-login { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: var(--black); background-image: radial-gradient(circle at 15% 20%, #2a2a2a 0, transparent 45%), radial-gradient(circle at 85% 90%, #3a0a0c 0, transparent 40%); }\n.epm-login-card { width: 100%; max-width: 400px; background: var(--white); border-radius: 12px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,.4); }\n.epm-login-brand { background: var(--black); padding: 22px 28px; border-bottom: 4px solid var(--red); }\n.epm-login-brand img { height: 34px; width: auto; }\n.epm-login-body { padding: 26px 28px 28px; }\n.epm-login-body h1 { font-size: 22px; margin-bottom: 4px; }\n.epm-login-form { margin-top: 18px; display: flex; flex-direction: column; gap: 6px; }\n.epm-login-form .epm-link { margin-top: 8px; align-self: center; }\n.epm-login-msg { font-size: 13px; color: var(--ink-2); margin-top: 12px !important; min-height: 1em; }\n.epm-learner { background: #ececea; }\n.epm-lf { padding: 32px 16px 64px; }\n.epm-lf-card { max-width: 760px; margin: 0 auto; background: var(--white); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }\n.epm-lf-head { background: var(--black); color: #fff; display: flex; align-items: center; gap: 14px; padding: 20px 28px; border-bottom: 4px solid var(--red); font-weight: 700; font-size: 13px; }\n.epm-lf-head img { height: 30px; width: auto; }\n.epm-lf-head span { border-left: 1px solid #444; padding-left: 14px; }\n.epm-lf-body { padding: 30px 28px 34px; }\n.epm-lf-body h1 { font-size: 26px; margin-bottom: 6px; }\n.epm-lf-form h2 { font-size: 13px !important; text-transform: uppercase !important; letter-spacing: .08em !important; color: var(--red) !important; margin: 28px 0 14px !important; padding-top: 18px; border-top: 1px solid var(--line); }\n.epm-lf-form .epm-btn-lg { margin-top: 10px; }\n.epm-lf-msg { color: var(--low); font-weight: 600; min-height: 1em; }\n.epm-lf-done { text-align: center; padding: 30px 0; }\n.epm-lf-check { width: 56px; height: 56px; border-radius: 50%; background: var(--good-bg); color: var(--good); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 14px; }\n@media (max-width: 900px) {\n.epm-grid2 { grid-template-columns: 1fr; }\n.epm-row3, .epm-row4 { grid-template-columns: 1fr 1fr; }\n.epm-srow { grid-template-columns: 1fr 70px; }\n.epm-srow > :nth-child(3), .epm-srow > :nth-child(4) { grid-column: 1 / -1; }\n.epm-brand span { display: none; }\n}\n@media (max-width: 640px) {\n.epm-top { padding: 0 12px; gap: 10px; height: auto; min-height: 56px; flex-wrap: wrap; }\n.epm-nav { order: 3; flex-basis: 100%; padding-bottom: 6px; }\n.epm-me-name { display: none; }\n.epm-me { margin-left: auto; }\n.epm-main { padding: 18px 16px 60px; }\n.epm-root h1 { font-size: 22px; }\n.epm-row2, .epm-row3, .epm-row4, .epm-rows .epm-row3 { grid-template-columns: 1fr; }\n.epm-ccard-kpis { grid-template-columns: repeat(2, 1fr); row-gap: 10px; }\n.epm-bar-row { grid-template-columns: 1fr 70px; }\n.epm-bar-label { grid-column: 1 / -1; }\n.epm-xkey { columns: 1; }\n.epm-timeline li { grid-template-columns: 1fr auto; }\n.epm-tl-date { grid-column: 1 / -1; }\n.epm-lf { padding: 0 0 40px; }\n.epm-lf-card { border-radius: 0; }\n.epm-lf-body { padding: 22px 16px; }\n.epm-lf-head { padding: 16px; }\n.epm-overlay { padding: 0; }\n.epm-modal { border-radius: 0; min-height: 100vh; }\n.epm-modal-foot { flex-wrap: wrap; }\n.epm-sticky { min-width: 130px; }\n.epm-toolbar .epm-input { min-width: 0; flex: 1 1 100%; }\n}\n.epm-rcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }\n.epm-rcard { display: grid; grid-template-columns: 104px 1fr; gap: 14px; align-items: center; border: 1px solid var(--line); border-radius: var(--r); padding: 14px; background: #fcfcfb; }\n.epm-rcard-ring { display: flex; flex-direction: column; align-items: center; gap: 2px; }\n.epm-rcard-ring small { font-size: 11px; color: var(--muted); }\n.epm-ring-v { font: 800 22px Montserrat, system-ui, sans-serif; fill: var(--ink); }\n.epm-ring-u { font: 600 10px Montserrat, system-ui, sans-serif; fill: var(--muted); }\n.epm-root .epm-rcard h5 { margin: 0 0 10px; font-size: 14px; font-weight: 700; line-height: 1.3; color: var(--ink); text-transform: none; letter-spacing: 0; }\n.epm-rbars { display: flex; flex-direction: column; gap: 7px; }\n.epm-rbar { display: grid; grid-template-columns: minmax(70px, 34%) 1fr 64px; gap: 8px; align-items: center; font-size: 12px; }\n.epm-rbar-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }\n.epm-rbar-track { height: 10px; background: #ececea; border-radius: 0 4px 4px 0; overflow: hidden; }\n.epm-rbar-track i { display: block; height: 100%; border-radius: 0 4px 4px 0; }\n.epm-rbar-val { font-weight: 700; text-align: right; white-space: nowrap; }\n.epm-rbar-val small { font-weight: 500; color: var(--muted); }\n@media (max-width: 640px) { .epm-rcards { grid-template-columns: 1fr; } .epm-rcard { grid-template-columns: 1fr; justify-items: start; } }";
+  var st = document.createElement('style'); st.id = 'epm-styles'; st.textContent = ".epm-root {\n--red: #d7141a; --red-d: #b00f14; --red-soft: #fdecec;\n--ink: #141414; --ink-2: #3a3a3a; --muted: #6e6e6e; --line: #e5e5e3; --line-2: #f0f0ee;\n--bg: #f6f6f4; --white: #ffffff; --black: #111111;\n--good: #1d7a35; --good-bg: #e6f3e9; --mid: #8a5a00; --mid-bg: #fff3d6; --low: #b3141a; --low-bg: #fbe6e6;\n--info: #1f5fae; --info-bg: #e7effa; --violet: #5b3fb8; --violet-bg: #eeeafb;\n--r: 8px; --shadow: 0 1px 2px rgba(0,0,0,.05), 0 6px 20px rgba(0,0,0,.06);\nfont-family: Montserrat, system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;\nfont-size: 14px; line-height: 1.5; color: var(--ink); background: var(--bg);\nmin-height: 100vh; text-align: left; -webkit-font-smoothing: antialiased; position: relative;\n}\n.epm-root *, .epm-root *::before, .epm-root *::after { box-sizing: border-box; }\n.epm-root :where(h1, h2, h3, h4) { font-family: inherit; color: var(--ink); margin: 0; letter-spacing: -0.01em; line-height: 1.25; text-transform: none; }\n.epm-root :where(h1) { font-size: 26px; font-weight: 800; }\n.epm-root :where(h2) { font-size: 18px; font-weight: 700; }\n.epm-root :where(h3) { font-size: 15px; font-weight: 700; }\n.epm-root :where(h4) { font-size: 13px; font-weight: 700; margin: 14px 0 6px; }\n.epm-root :where(p) { margin: 0 0 8px; font-size: inherit; }\n.epm-root :where(a) { color: inherit; text-decoration: none; }\n.epm-root :where(img) { max-width: 100%; display: block; }\n.epm-root :where(button, input, select, textarea) { font: inherit; color: inherit; letter-spacing: normal; text-transform: none; margin: 0; border-radius: 0; }\n.epm-root :where(label) { display: inline; font-weight: inherit; margin: 0; }\n.epm-root ul, .epm-root ol { margin: 0 !important; padding: 0 !important; list-style: none !important; }\n.epm-root li { list-style: none !important; background-image: none !important; padding-left: 0; margin-left: 0; }\n.epm-root li::before { content: none !important; }\n.epm-root li::marker { content: '' !important; }\n.epm-root ol.epm-xkey { padding-left: 22px !important; list-style: decimal !important; }\n.epm-root ol.epm-xkey li { list-style: decimal !important; }\n.epm-root ol.epm-xkey li::marker { content: counter(list-item) '. ' !important; }\n.epm-root :where(table) { font-size: inherit; }\n.epm-root [hidden] { display: none !important; }\n.epm-root :focus-visible { outline: 2px solid var(--red); outline-offset: 2px; }\n.epm-progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 100; background: transparent; overflow: hidden; pointer-events: none; }\n.epm-progress.on::after { content: ''; position: absolute; left: -40%; width: 40%; height: 100%; background: var(--red); animation: epm-load 1s ease-in-out infinite; }\n@keyframes epm-load { to { left: 100%; } }\n.epm-top { background: var(--black); color: #fff; display: flex; align-items: center; gap: 24px; padding: 0 24px; height: 60px; border-bottom: 3px solid var(--red); position: sticky; top: 0; z-index: 20; }\n.epm-brand { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 14px; color: #fff !important; white-space: nowrap; }\n.epm-brand img { height: 26px; width: auto; }\n.epm-brand span { border-left: 1px solid #444; padding-left: 12px; }\n.epm-nav { display: flex; gap: 2px; flex: 1; overflow-x: auto; scrollbar-width: none; }\n.epm-nav a { color: #c9c9c9 !important; padding: 8px 12px; border-radius: 6px; font-weight: 600; font-size: 13px; white-space: nowrap; }\n.epm-nav a:hover { color: #fff !important; background: #222; }\n.epm-nav a.on { color: #fff !important; background: #262626; box-shadow: inset 0 -2px 0 var(--red); }\n.epm-me { display: flex; align-items: center; gap: 8px; }\n.epm-me-name { display: flex; flex-direction: column; align-items: flex-end; font-size: 12px; font-weight: 600; line-height: 1.2; }\n.epm-me-name small { color: #9a9a9a; font-weight: 500; }\n.epm-main { max-width: 1280px; margin: 0 auto; padding: 28px 24px 80px; }\n.epm-page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }\n.epm-sub { color: var(--muted); margin: 4px 0 0 !important; }\n.epm-crumb { display: inline-flex; align-items: center; gap: 4px; color: var(--muted) !important; font-size: 12px; font-weight: 600; margin-bottom: 6px; }\n.epm-crumb:hover { color: var(--red) !important; }\n.epm-h2 { margin: 26px 0 12px !important; font-size: 13px !important; text-transform: uppercase !important; letter-spacing: .08em !important; color: var(--muted) !important; }\n.epm-h3 { margin: 22px 0 10px !important; }\n.epm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--white); color: var(--ink); font-weight: 600; font-size: 13px; cursor: pointer; white-space: nowrap; transition: background .15s, border-color .15s, color .15s; }\n.epm-btn:hover { border-color: #cfcfcc; background: #fafafa; }\n.epm-btn:disabled { opacity: .5; cursor: not-allowed; }\n.epm-btn-primary { background: var(--red); border-color: var(--red); color: #fff; }\n.epm-btn-primary:hover { background: var(--red-d); border-color: var(--red-d); }\n.epm-btn-ghost { background: transparent; border-color: transparent; }\n.epm-btn-ghost:hover { background: var(--line-2); border-color: transparent; }\n.epm-btn-ghost-inv { background: transparent; border-color: transparent; color: #ddd; }\n.epm-btn-ghost-inv:hover { background: #262626; color: #fff; border-color: transparent; }\n.epm-btn-danger { background: var(--low); border-color: var(--low); color: #fff; }\n.epm-btn-danger-ghost { background: transparent; border-color: transparent; color: var(--low); }\n.epm-btn-danger-ghost:hover { background: var(--low-bg); }\n.epm-btn-block { width: 100%; min-height: 44px; }\n.epm-btn-lg { min-height: 48px; padding: 0 24px; font-size: 15px; }\n.epm-btn .epm-ic { flex: none; }\n.epm-pulse { box-shadow: 0 0 0 4px rgba(215,20,26,.18); }\n.epm-link { background: none; border: 0; padding: 0; color: var(--red) !important; font-weight: 600; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }\n.epm-link:hover { text-decoration: underline; }\n.epm-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }\n.epm-page-head .epm-actions { margin-top: 0; }\n.epm-spacer { flex: 1; }\n.epm-card { background: var(--white); border: 1px solid var(--line); border-radius: var(--r); padding: 18px 20px; margin-bottom: 16px; }\n.epm-card > h3 { margin-bottom: 12px; }\n.epm-card-flat { background: var(--bg); border-style: dashed; margin-top: 16px; }\n.epm-card-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }\n.epm-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }\n.epm-ccard { display: block; background: var(--white); border: 1px solid var(--line); border-radius: var(--r); padding: 18px; transition: border-color .15s, box-shadow .15s, transform .15s; }\n.epm-ccard:hover { border-color: #cfcfcc; box-shadow: var(--shadow); transform: translateY(-1px); }\n.epm-ccard-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 2px; }\n.epm-ccard-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; border-top: 1px solid var(--line-2); padding-top: 12px; margin-top: 10px; }\n.epm-ccard-kpis div { display: flex; flex-direction: column; }\n.epm-ccard-kpis b { font-size: 16px; font-weight: 700; }\n.epm-ccard-kpis span { font-size: 11px; color: var(--muted); }\n.epm-progressbar { height: 4px; border-radius: 2px; background: var(--line-2); margin: 12px 0 4px; overflow: hidden; }\n.epm-progressbar i { display: block; height: 100%; background: var(--black); }\n.epm-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }\n.epm-grid2 > .epm-card { margin-bottom: 0; }\n.epm-grid2 { margin-bottom: 16px; }\n.epm-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }\n.epm-kpi { background: var(--white); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; position: relative; overflow: hidden; }\n.epm-kpi::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--line); }\n.epm-kpi-good::before { background: var(--good); } .epm-kpi-mid::before { background: #e3a008; } .epm-kpi-low::before { background: var(--low); }\n.epm-kpi-v { font-size: 26px; font-weight: 800; letter-spacing: -0.02em; line-height: 1.1; }\n.epm-kpi-l { font-size: 12px; font-weight: 600; color: var(--ink-2); margin-top: 4px; }\n.epm-kpi-s { font-size: 11px; color: var(--muted); }\n.epm-next-date { font-size: 22px; font-weight: 800; margin-bottom: 4px; }\n.epm-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; overflow-x: auto; scrollbar-width: thin; }\n.epm-tab { padding: 10px 14px; font-weight: 600; font-size: 13px; color: var(--muted) !important; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; }\n.epm-tab:hover { color: var(--ink) !important; }\n.epm-tab.on { color: var(--ink) !important; border-bottom-color: var(--red); }\n.epm-subtabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }\n.epm-subtabs a { padding: 6px 12px; border-radius: 999px; border: 1px solid var(--line); font-weight: 600; font-size: 12px; color: var(--ink-2) !important; background: var(--white); cursor: pointer; }\n.epm-subtabs a.on { background: var(--black); border-color: var(--black); color: #fff !important; }\n.epm-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }\n.epm-toolbar .epm-input { width: auto; min-width: 180px; }\n.epm-toolbar p { margin: 0; }\n.epm-table-wrap { overflow-x: auto; background: var(--white); border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 12px; max-width: 100%; }\n.epm-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }\n.epm-table th { text-align: left; font-weight: 700; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--line); background: #fbfbfa; white-space: nowrap; position: sticky; top: 0; z-index: 1; }\n.epm-table td { padding: 10px 12px; border-bottom: 1px solid var(--line-2); vertical-align: top; }\n.epm-table tbody tr:last-child td { border-bottom: 0; }\n.epm-table .num { text-align: right; white-space: nowrap; }\n.epm-table-sm td, .epm-table-sm th { padding: 7px 10px; }\n.epm-table-click tbody tr { cursor: pointer; }\n.epm-table-click tbody tr:hover td { background: #fafaf8; }\n.epm-table tr.epm-clickable { cursor: pointer; }\n.epm-table tr.epm-clickable:hover td { background: #fafaf8; }\n.epm-table tr.epm-dim td { opacity: .55; }\n.epm-table tfoot td { font-weight: 700; border-top: 1px solid var(--line); background: #fbfbfa; }\n.epm-sticky { position: sticky; left: 0; background: var(--white); z-index: 2; min-width: 170px; }\nth.epm-sticky { background: #fbfbfa; z-index: 3; }\n.epm-nowrap { white-space: nowrap; }\n.epm-small { font-size: 12px; }\n.epm-muted { color: var(--muted); }\n.epm-pct { display: inline-block; min-width: 48px; text-align: center; padding: 2px 8px; border-radius: 4px; font-weight: 700; font-size: 12px; }\n.epm-t-good { color: var(--good); } .epm-t-mid { color: var(--mid); } .epm-t-low { color: var(--low); } .epm-t-none { color: var(--muted); }\n.epm-pct.epm-t-good { background: var(--good-bg); } .epm-pct.epm-t-mid { background: var(--mid-bg); } .epm-pct.epm-t-low { background: var(--low-bg); }\n.epm-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; line-height: 1.5; background: var(--line-2); color: var(--ink-2); white-space: nowrap; margin: 1px 2px 1px 0; vertical-align: middle; }\n.epm-badge-good { background: var(--good-bg); color: var(--good); } .epm-badge-bad { background: var(--low-bg); color: var(--low); }\n.epm-badge-mid { background: var(--mid-bg); color: var(--mid); } .epm-badge-info { background: var(--info-bg); color: var(--info); }\n.epm-badge-violet { background: var(--violet-bg); color: var(--violet); } .epm-badge-dark { background: var(--black); color: #fff; }\n.epm-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 12px; font-weight: 600; margin: 2px 4px 2px 0; }\n.epm-chip:hover { border-color: var(--red); }\n.epm-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--muted); }\n.epm-dot-good { background: var(--good); } .epm-dot-bad { background: var(--low); } .epm-dot-info { background: var(--info); } .epm-dot-violet { background: var(--violet); } .epm-dot-dark { background: var(--black); }\n.epm-att-wrap { max-height: 70vh; }\n.epm-att-table th, .epm-att-table td { padding: 0; }\n.epm-att-table td.epm-sticky, .epm-att-table th.epm-sticky { padding: 6px 10px; }\n.epm-att-table td.num, .epm-att-table th.num { padding: 6px 8px; }\n.epm-att-h { text-align: center !important; min-width: 44px; font-size: 10px !important; letter-spacing: 0 !important; top: 33px !important; }\n.epm-att-h small { display: block; color: var(--ink-2); font-weight: 600; }\n.epm-att-hb { border: 0; background: none; padding: 6px 2px; cursor: pointer; width: 100%; font-weight: 700; color: inherit; font-size: 10px; text-transform: uppercase; }\n.epm-att-hb:hover { color: var(--red); }\n.epm-group { text-align: center !important; border-left: 1px solid var(--line); background: #f3f3f1 !important; color: var(--ink) !important; padding: 6px 4px !important; }\n.epm-att { text-align: center; border-left: 1px solid #dddcd7; }\n.epm-att-table tbody td, .epm-att-table tfoot td { border-bottom: 1px solid #e3e2dd; }\n.epm-att-table .epm-att-h { border-left: 1px solid #dddcd7; }\n.epm-att-table .epm-gstart { border-left: 2px solid #8f8f8a !important; }\n.epm-att-table .epm-group { border-left: 2px solid #8f8f8a; }\n.epm-att.na { background: repeating-linear-gradient(135deg, #f7f7f5, #f7f7f5 4px, #efefec 4px, #efefec 8px); }\n.epm-att.na span { color: #a3a39e; cursor: default; }\n.epm-att button, .epm-att span { width: 100%; min-height: 34px; border: 0; background: transparent; cursor: pointer; font-weight: 700; font-size: 12px; color: #b5b5b5; display: block; line-height: 34px; }\n.epm-att.p { background: var(--good-bg); } .epm-att.p button, .epm-att.p span { color: var(--good); }\n.epm-att.a { background: var(--low-bg); } .epm-att.a button, .epm-att.a span { color: var(--low); }\n.epm-att button:hover { box-shadow: inset 0 0 0 2px var(--ink); }\n.epm-block { padding: 0; overflow: hidden; }\n.epm-block .epm-table-wrap { border: 0; border-radius: 0; margin: 0; }\n.epm-block-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); background: #fbfbfa; flex-wrap: wrap; }\n.epm-block-no { display: inline-block; min-width: 28px; margin-right: 8px; padding: 1px 6px; border-radius: 4px; background: var(--black); color: #fff; font-size: 12px; font-weight: 700; text-align: center; }\n.epm-block-no:empty { display: none; }\ntr.epm-done td:first-child { color: var(--muted); }\n.epm-cal { table-layout: fixed; min-width: 760px; }\n.epm-cal td { overflow-wrap: anywhere; }\n.epm-rec { margin-right: 10px; }\ntr.epm-break td { background: repeating-linear-gradient(135deg, #fafaf8, #fafaf8 6px, #f2f2ef 6px, #f2f2ef 12px); color: var(--muted); font-size: 12px; font-weight: 600; text-align: center; }\n.epm-chart { position: relative; }\n.epm-chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }\n.epm-chart-head h4 { margin: 0; font-size: 14px; }\n.epm-chart-body { position: relative; }\n.epm-svg { display: block; width: 100%; height: auto; overflow: visible; }\n.epm-grid { stroke: #ececea; stroke-width: 1; }\n.epm-axis { fill: var(--muted); font-size: 11px; font-family: inherit; }\n.epm-cross { stroke: #9a9a9a; stroke-width: 1; stroke-dasharray: 3 3; }\n.epm-tip { position: absolute; display: none; background: var(--black); color: #fff; padding: 8px 10px; border-radius: 6px; font-size: 12px; pointer-events: none; min-width: 140px; max-width: 260px; z-index: 5; box-shadow: var(--shadow); }\n.epm-tip-t { color: #bbb; margin-bottom: 4px; font-size: 11px; }\n.epm-tip-r { display: flex; align-items: center; gap: 6px; }\n.epm-tip-r i { width: 12px; height: 2px; display: inline-block; }\n.epm-tip-r b { font-weight: 700; }\n.epm-tip-r span { color: #ccc; }\n.epm-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 8px; font-size: 12px; color: var(--ink-2); }\n.epm-legend-i { display: inline-flex; align-items: center; gap: 6px; }\n.epm-legend-i i { width: 14px; height: 2px; display: inline-block; border-radius: 1px; }\n.epm-bars { display: flex; flex-direction: column; gap: 6px; }\n.epm-bar-row { display: grid; grid-template-columns: minmax(120px, 34%) 1fr 90px; gap: 10px; align-items: center; font-size: 12px; }\n.epm-bar-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.epm-bar-track { height: 12px; background: var(--line-2); border-radius: 0 4px 4px 0; overflow: hidden; }\n.epm-bar-fill { height: 100%; border-radius: 0 4px 4px 0; }\n.epm-bar-val { font-weight: 700; }\n.epm-bar-val small { color: var(--muted); font-weight: 500; }\n.epm-xkey { columns: 2; column-gap: 24px; font-size: 12px; color: var(--ink-2); margin-top: 10px !important; }\n.epm-xkey li { margin-bottom: 2px; break-inside: avoid; }\n.epm-risk { list-style: none; }\n.epm-risk li { display: flex; justify-content: space-between; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; flex-wrap: wrap; }\n.epm-risk a { font-weight: 600; } .epm-risk a:hover { color: var(--red); }\n.epm-timeline { list-style: none; margin-top: 12px !important; }\n.epm-timeline li { display: grid; grid-template-columns: 74px 1fr auto; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; align-items: start; }\n.epm-tl-date { color: var(--muted); font-size: 12px; font-weight: 600; }\n.epm-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; min-width: 0; }\n.epm-label { font-size: 12px; font-weight: 600; color: var(--ink-2); }\n.epm-hint { font-size: 11px; color: var(--muted); }\n.epm-input { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid #d6d6d2; border-radius: 6px; background: var(--white); font-size: 14px; color: var(--ink); margin: 0; box-shadow: none; }\ntextarea.epm-input { resize: vertical; min-height: 60px; line-height: 1.45; }\n.epm-input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(17,17,17,.08); }\n.epm-input:disabled, .epm-input[readonly] { background: #f4f4f2; color: var(--ink-2); }\nselect.epm-input { padding-right: 28px; }\n.epm-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }\n.epm-row3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; align-items: start; }\n.epm-row4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }\n.epm-checks { display: flex; flex-wrap: wrap; gap: 6px 14px; }\n.epm-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; margin: 0; font-weight: 500; }\n.epm-check input { width: 16px; height: 16px; accent-color: var(--red); margin: 0; }\n.epm-scale { display: flex; flex-wrap: wrap; gap: 4px; }\n.epm-scale-b { width: 38px; height: 34px; border: 1px solid #d6d6d2; border-radius: 6px; background: var(--white); cursor: pointer; font-weight: 700; }\n.epm-scale-b.on { background: var(--black); border-color: var(--black); color: #fff; }\n.epm-stack { display: flex; flex-direction: column; gap: 8px; }\n.epm-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }\n.epm-row3 > .epm-btn { align-self: center; }\n.epm-rows .epm-row3 { grid-template-columns: 1.4fr 1fr 1fr auto; }\n.epm-picker { border: 1px solid var(--line); border-radius: 6px; padding: 10px; }\n.epm-picker-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 6px; max-height: 200px; overflow: auto; margin-top: 8px; }\n.epm-check-all { padding-bottom: 6px; border-bottom: 1px solid var(--line-2); width: 100%; }\n.epm-p { margin-bottom: 12px !important; }\n.epm-sblock { border: 1px solid var(--line); border-radius: 6px; margin-bottom: 10px; overflow: hidden; }\n.epm-sblock-head { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px; background: #f7f7f5; border-bottom: 1px solid var(--line); }\n.epm-sblock-head .epm-input { width: auto; }\n.epm-sblock-head .epm-input[aria-label=\"Title\"] { flex: 1; min-width: 200px; }\n.epm-sblock-btns { display: flex; margin-left: auto; }\n.epm-srows { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }\n.epm-srow { display: grid; grid-template-columns: 150px 70px 1fr 180px auto; gap: 6px; align-items: center; }\n.epm-srow .epm-input { min-height: 34px; padding: 5px 8px; font-size: 13px; }\n.epm-danger-zone { border-color: #f1c4c5; }\n.epm-overlay { position: fixed; inset: 0; background: rgba(17,17,17,.45); z-index: 1000; display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px; overflow-y: auto; animation: epm-fade .15s; }\n.epm-overlay-drawer { justify-content: flex-end; padding: 0; align-items: stretch; }\n@keyframes epm-fade { from { opacity: 0; } }\n.epm-modal { background: var(--white); border-radius: 10px; width: 100%; max-width: 560px; box-shadow: 0 20px 60px rgba(0,0,0,.25); display: flex; flex-direction: column; max-height: none; font-family: Montserrat, system-ui, sans-serif; font-size: 14px; color: var(--ink); }\n.epm-modal-wide { max-width: 880px; }\n.epm-drawer { max-width: 720px; border-radius: 0; min-height: 100vh; animation: epm-slide .2s ease-out; }\n@keyframes epm-slide { from { transform: translateX(40px); opacity: 0; } }\n.epm-modal-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--white); z-index: 2; border-radius: 10px 10px 0 0; }\n.epm-modal-head h3 { font-size: 17px; font-weight: 800; }\n.epm-modal-body { padding: 18px 20px; }\n.epm-modal-foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; padding: 14px 20px; border-top: 1px solid var(--line); position: sticky; bottom: 0; background: var(--white); border-radius: 0 0 10px 10px; }\n.epm-drawer-sum { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; font-size: 13px; padding-bottom: 14px; margin-bottom: 14px; border-bottom: 1px solid var(--line-2); }\n.epm-dl { display: grid; grid-template-columns: 120px 1fr; gap: 8px 12px; margin: 0; }\n.epm-dl dt { color: var(--muted); font-size: 12px; font-weight: 600; } .epm-dl dd { margin: 0; }\n.epm-details { background: var(--white); border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 8px; padding: 0 14px; }\n.epm-details summary { padding: 12px 0; cursor: pointer; font-size: 13px; list-style-position: inside; }\n.epm-details[open] summary { border-bottom: 1px solid var(--line-2); margin-bottom: 10px; }\n.epm-details .epm-table-wrap { margin-bottom: 14px; }\n.epm-qa { padding: 6px 0 12px; }\n.epm-q { font-size: 12px; font-weight: 700; color: var(--ink-2); margin-bottom: 2px; }\n.epm-a { white-space: pre-wrap; font-size: 13px; }\n.epm-lms-sec { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: 10px 0 6px; }\n.epm-lms { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }\n.epm-lms-row { display: grid; grid-template-columns: 112px 1fr auto; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 6px; font-size: 13px; color: var(--ink-2); background: #fafaf8; }\n.epm-lms-row.ok { color: var(--ink); background: var(--good-bg); }\n.epm-lms-pill { display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: #e9e9e5; color: #6b6b66; }\n.epm-lms-row.ok .epm-lms-pill { background: var(--good); color: #fff; }\n.epm-lms-count { font-size: 12px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #ececea; color: var(--ink-2); letter-spacing: 0; text-transform: none; }\n.epm-lms-count.all { background: var(--good-bg); color: var(--good); } .epm-lms-count.some { background: var(--mid-bg); color: var(--mid); }\n.epm-defreeze { display: inline-flex; gap: 6px; align-items: flex-start; } .epm-defreeze .epm-ic { flex: none; margin-top: 2px; color: var(--muted); }\n.epm-status { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; } .epm-status small { font-size: 11px; color: var(--muted); }\n.epm-int { list-style: none; } .epm-int li { padding: 6px 0; }\n.epm-log { list-style: none; margin-top: 10px !important; font-size: 13px; } .epm-log li { padding: 3px 0; }\n.epm-toasts { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 2000; align-items: center; width: max-content; max-width: calc(100vw - 32px); }\n.epm-toast { background: var(--black); color: #fff; padding: 10px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; box-shadow: var(--shadow); transition: opacity .3s, transform .3s; max-width: 640px; }\n.epm-toast-error { background: var(--low); }\n.epm-toast.out { opacity: 0; transform: translateY(8px); }\n.epm-empty { text-align: center; padding: 36px 16px; color: var(--muted); background: var(--white); border: 1px dashed var(--line); border-radius: var(--r); }\n.epm-empty p { margin-bottom: 12px !important; }\n.epm-loading { color: var(--muted); padding: 24px 0; font-weight: 600; }\n.epm-center { text-align: center; padding-top: 30vh; }\n.epm-login { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px 16px; background: var(--black); background-image: radial-gradient(circle at 15% 20%, #2a2a2a 0, transparent 45%), radial-gradient(circle at 85% 90%, #3a0a0c 0, transparent 40%); }\n.epm-login-card { width: 100%; max-width: 400px; background: var(--white); border-radius: 12px; overflow: hidden; box-shadow: 0 30px 80px rgba(0,0,0,.4); }\n.epm-login-brand { background: var(--black); padding: 22px 28px; border-bottom: 4px solid var(--red); }\n.epm-login-brand img { height: 34px; width: auto; }\n.epm-login-body { padding: 26px 28px 28px; }\n.epm-login-body h1 { font-size: 22px; margin-bottom: 4px; }\n.epm-login-form { margin-top: 18px; display: flex; flex-direction: column; gap: 6px; }\n.epm-login-form .epm-link { margin-top: 8px; align-self: center; }\n.epm-login-msg { font-size: 13px; color: var(--ink-2); margin-top: 12px !important; min-height: 1em; }\n.epm-learner { background: #ececea; }\n.epm-lf { padding: 32px 16px 64px; }\n.epm-lf-card { max-width: 760px; margin: 0 auto; background: var(--white); border-radius: 12px; overflow: hidden; box-shadow: var(--shadow); }\n.epm-lf-head { background: var(--black); color: #fff; display: flex; align-items: center; gap: 14px; padding: 20px 28px; border-bottom: 4px solid var(--red); font-weight: 700; font-size: 13px; }\n.epm-lf-head img { height: 30px; width: auto; }\n.epm-lf-head span { border-left: 1px solid #444; padding-left: 14px; }\n.epm-lf-body { padding: 30px 28px 34px; }\n.epm-lf-body h1 { font-size: 26px; margin-bottom: 6px; }\n.epm-lf-form h2 { font-size: 13px !important; text-transform: uppercase !important; letter-spacing: .08em !important; color: var(--red) !important; margin: 28px 0 14px !important; padding-top: 18px; border-top: 1px solid var(--line); }\n.epm-lf-form .epm-btn-lg { margin-top: 10px; }\n.epm-lf-msg { color: var(--low); font-weight: 600; min-height: 1em; }\n.epm-lf-done { text-align: center; padding: 30px 0; }\n.epm-lf-check { width: 56px; height: 56px; border-radius: 50%; background: var(--good-bg); color: var(--good); display: inline-flex; align-items: center; justify-content: center; margin-bottom: 14px; }\n@media (max-width: 900px) {\n.epm-grid2 { grid-template-columns: 1fr; }\n.epm-row3, .epm-row4 { grid-template-columns: 1fr 1fr; }\n.epm-srow { grid-template-columns: 1fr 70px; }\n.epm-srow > :nth-child(3), .epm-srow > :nth-child(4) { grid-column: 1 / -1; }\n.epm-brand span { display: none; }\n}\n@media (max-width: 640px) {\n.epm-top { padding: 0 12px; gap: 10px; height: auto; min-height: 56px; flex-wrap: wrap; }\n.epm-nav { order: 3; flex-basis: 100%; padding-bottom: 6px; }\n.epm-me-name { display: none; }\n.epm-me { margin-left: auto; }\n.epm-main { padding: 18px 16px 60px; }\n.epm-root h1 { font-size: 22px; }\n.epm-row2, .epm-row3, .epm-row4, .epm-rows .epm-row3 { grid-template-columns: 1fr; }\n.epm-ccard-kpis { grid-template-columns: repeat(2, 1fr); row-gap: 10px; }\n.epm-bar-row { grid-template-columns: 1fr 70px; }\n.epm-bar-label { grid-column: 1 / -1; }\n.epm-xkey { columns: 1; }\n.epm-timeline li { grid-template-columns: 1fr auto; }\n.epm-tl-date { grid-column: 1 / -1; }\n.epm-lf { padding: 0 0 40px; }\n.epm-lf-card { border-radius: 0; }\n.epm-lf-body { padding: 22px 16px; }\n.epm-lf-head { padding: 16px; }\n.epm-overlay { padding: 0; }\n.epm-modal { border-radius: 0; min-height: 100vh; }\n.epm-modal-foot { flex-wrap: wrap; }\n.epm-sticky { min-width: 130px; }\n.epm-toolbar .epm-input { min-width: 0; flex: 1 1 100%; }\n}\n.epm-rcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }\n.epm-rcard { display: grid; grid-template-columns: 104px 1fr; gap: 14px; align-items: center; border: 1px solid var(--line); border-radius: var(--r); padding: 14px; background: #fcfcfb; }\n.epm-rcard-ring { display: flex; flex-direction: column; align-items: center; gap: 2px; }\n.epm-rcard-ring small { font-size: 11px; color: var(--muted); }\n.epm-ring-v { font: 800 22px Montserrat, system-ui, sans-serif; fill: var(--ink); }\n.epm-ring-u { font: 600 10px Montserrat, system-ui, sans-serif; fill: var(--muted); }\n.epm-root .epm-rcard h5 { margin: 0 0 10px; font-size: 14px; font-weight: 700; line-height: 1.3; color: var(--ink); text-transform: none; letter-spacing: 0; }\n.epm-rbars { display: flex; flex-direction: column; gap: 7px; }\n.epm-rbar { display: grid; grid-template-columns: minmax(70px, 34%) 1fr 64px; gap: 8px; align-items: center; font-size: 12px; }\n.epm-rbar-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }\n.epm-rbar-track { height: 10px; background: #ececea; border-radius: 0 4px 4px 0; overflow: hidden; }\n.epm-rbar-track i { display: block; height: 100%; border-radius: 0 4px 4px 0; }\n.epm-rbar-val { font-weight: 700; text-align: right; white-space: nowrap; }\n.epm-rbar-val small { font-weight: 500; color: var(--muted); }\n@media (max-width: 640px) { .epm-rcards { grid-template-columns: 1fr; } .epm-rcard { grid-template-columns: 1fr; justify-items: start; } }\n.epm-root.epm-portal { min-height: 0; background: transparent; position: static; }\nhtml.epm-noscroll, html.epm-noscroll body { overflow: hidden; }\n.epm-root th.epm-lms-h { min-width: 84px; max-width: 120px; white-space: normal; vertical-align: bottom; }\n.epm-root th.epm-lms-h > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 11px; line-height: 1.25; text-align: right; cursor: help; }\n.epm-block-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }\n.epm-drawer-actions { margin: -4px 0 12px; justify-content: flex-end; }\n.epm-inline { display: flex; gap: 6px; align-items: center; } .epm-inline > .epm-input { flex: 1; min-width: 0; }\n.epm-root .epm-hp { position: absolute !important; left: -9999px !important; width: 1px; height: 1px; opacity: 0; pointer-events: none; }\n.epm-root .epm-invalid, .epm-root .epm-input.epm-invalid { border-color: var(--low) !important; box-shadow: 0 0 0 3px var(--low-bg); border-radius: 6px; }\n.epm-input-sm { padding: 3px 6px !important; font-size: 12px !important; height: auto !important; width: auto !important; margin-top: 4px !important; }\n.epm-row-bad td { background: #fff7f7; }\n.epm-gantt { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r); background: var(--white); margin: 8px 0 10px; }\n.epm-gantt-inner { position: relative; }\n.epm-gantt-head, .epm-gantt-row { display: flex; border-bottom: 1px solid var(--line-2); }\n.epm-gantt-row:last-child { border-bottom: 0; }\n.epm-gantt-head { position: sticky; top: 0; background: #fafaf8; z-index: 2; height: 30px; }\n.epm-gantt-label { width: 190px; flex: 0 0 190px; padding: 8px 12px; position: sticky; left: 0; background: inherit; z-index: 3; border-right: 1px solid var(--line); display: flex; flex-direction: column; justify-content: center; min-width: 0; }\n.epm-gantt-row .epm-gantt-label { background: var(--white); }\n.epm-gantt-row.draft .epm-gantt-label { background: #fbfbf9; }\n.epm-gantt-label b { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.epm-gantt-label small { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }\n.epm-gantt-track { position: relative; height: 48px; flex: none; }\n.epm-gantt-head .epm-gantt-track { height: 30px; }\n.epm-gantt-month { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--line); padding: 7px 0 0 5px; font-size: 11px; font-weight: 700; color: var(--muted); white-space: nowrap; text-transform: uppercase; letter-spacing: .04em; }\n.epm-gantt-today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--red); }\n.epm-gantt-today::after { content: 'Today'; position: absolute; top: 7px; left: 4px; font-size: 10px; font-weight: 700; color: var(--red); }\n.epm-gantt-todayline { position: absolute; top: 0; bottom: 0; width: 0; border-left: 2px solid rgba(215,20,26,.35); z-index: 1; }\n.epm-gantt-bar { position: absolute; top: 12px; height: 24px; border-radius: 5px; background: var(--ink-2); color: #fff; font-size: 11px; font-weight: 700; overflow: hidden; cursor: default; z-index: 2; box-shadow: inset 0 0 0 1px rgba(0,0,0,.08); }\n.epm-gantt-bar[tabindex] { cursor: pointer; } .epm-gantt-bar[tabindex]:hover { filter: brightness(1.12); }\n.epm-gantt-bar span { position: relative; z-index: 1; padding: 0 6px; line-height: 24px; white-space: nowrap; }\n.epm-gantt-bar i { position: absolute; bottom: 0; height: 4px; background: rgba(255,255,255,.75); border-radius: 1px; }\n.epm-gantt-bar.k-course { background: #2b2b2b; }\n.epm-gantt-bar.k-case_study { background: #6e6e6e; }\n.epm-gantt-bar.k-welcome, .epm-gantt-bar.k-wrapup, .epm-gantt-bar.k-other { background: #b9b9b4; color: var(--ink); }\n.epm-gantt-bar.k-welcome i, .epm-gantt-bar.k-wrapup i, .epm-gantt-bar.k-other i { background: rgba(0,0,0,.35); }\n.epm-gantt-bar.past { opacity: .55; }\n.epm-gantt-bar.draft { background: repeating-linear-gradient(135deg, #fff, #fff 5px, #f3f3f1 5px, #f3f3f1 10px); color: var(--ink); box-shadow: inset 0 0 0 1.5px #2b2b2b; }\n.epm-gantt-bar.draft i { background: #2b2b2b; }\n.epm-gantt-bar.clash, .epm-gantt-bar.off { box-shadow: inset 0 0 0 2px var(--red), 0 0 0 2px rgba(215,20,26,.2); }\n.epm-gantt-bar.clash:not(.draft), .epm-gantt-bar.off:not(.draft) { background: var(--red); color: #fff; }\n.epm-gantt-off { position: absolute; top: 6px; bottom: 6px; border-radius: 5px; background: repeating-linear-gradient(135deg, rgba(215,20,26,.13), rgba(215,20,26,.13) 4px, transparent 4px, transparent 8px); border: 1px dashed rgba(215,20,26,.5); font-size: 10px; color: var(--low); font-weight: 700; padding: 2px 4px; overflow: hidden; white-space: nowrap; z-index: 1; }\n.epm-gantt-legend .epm-legend-i i { width: 16px; height: 10px; border-radius: 3px; }\n.epm-gantt-legend i.k-course { background: #2b2b2b; } .epm-gantt-legend i.k-case_study { background: #6e6e6e; } .epm-gantt-legend i.k-welcome { background: #b9b9b4; }\n.epm-gantt-legend i.k-draft { background: repeating-linear-gradient(135deg, #fff, #fff 3px, #ddd 3px, #ddd 6px); box-shadow: inset 0 0 0 1.5px #2b2b2b; }\n.epm-gantt-legend i.k-clash { background: var(--red); }\n.epm-gantt-legend { margin-right: 6px; }\n.epm-month-title { min-width: 170px; text-align: center; }\n.epm-month-wrap { overflow-x: auto; }\n.epm-month { display: grid; grid-template-columns: repeat(7, minmax(110px, 1fr)); border: 1px solid var(--line); border-radius: var(--r); background: var(--line); gap: 1px; overflow: hidden; min-width: 780px; }\n.epm-month-wd { background: #fafaf8; font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 6px 8px; }\n.epm-month-day { background: var(--white); min-height: 96px; padding: 4px 5px 6px; display: flex; flex-direction: column; gap: 3px; }\n.epm-month-day.out { background: #fafaf8; } .epm-month-day.out .epm-month-n { color: #b5b5b0; }\n.epm-month-n { font-size: 12px; font-weight: 700; color: var(--ink-2); align-self: flex-end; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 50%; }\n.epm-month-day.today .epm-month-n { background: var(--red); color: #fff; }\n.epm-mchip { display: block; font-size: 11px; line-height: 1.3; padding: 2px 5px; border-radius: 4px; background: #f3f3f1; border-left: 3px solid #9a9a96; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); }\na.epm-mchip:hover { background: #ebebe8; }\n.epm-mchip span { color: var(--muted); }\n.epm-mchip.draft { background: #fff; border: 1px dashed #9a9a96; border-left-width: 3px; }\n.epm-mchip.clash { background: var(--low-bg); color: var(--low); }\n.epm-drafts { display: grid; grid-template-columns: 230px 1fr; gap: 16px; align-items: start; }\n.epm-dlist { display: flex; flex-direction: column; gap: 6px; position: sticky; top: 76px; }\n.epm-dlist > .epm-btn { margin-bottom: 6px; justify-content: center; }\n.epm-dlist-i { display: flex; flex-direction: column; padding: 10px 12px; border-radius: var(--r); background: var(--white); border: 1px solid var(--line); }\n.epm-dlist-i:hover { border-color: #cfcfcb; }\n.epm-dlist-i.on { border-color: var(--red); box-shadow: inset 3px 0 0 var(--red); }\n.epm-dlist-i b { font-size: 13px; } .epm-dlist-i small { font-size: 11px; color: var(--muted); }\n.epm-deditor { min-width: 0; display: flex; flex-direction: column; gap: 14px; }\n.epm-deditor > .epm-card { margin: 0; }\n.epm-dtable td { vertical-align: top; }\n.epm-dtable td .epm-input { min-width: 0; }\n.epm-dtable td:nth-child(2) { min-width: 220px; } .epm-dtable td:nth-child(3) select { min-width: 160px; }\n.epm-dtable td:nth-child(6) { display: table-cell; } .epm-dtable td:nth-child(6) .epm-badge { margin: 0 4px 4px 0; display: inline-block; }\n@media (max-width: 900px) { .epm-drafts { grid-template-columns: 1fr; } .epm-dlist { position: static; } }";
   document.head.appendChild(st);
   if (!document.querySelector('link[href*="family=Montserrat"]')) {
     var l = document.createElement('link'); l.rel = 'stylesheet';

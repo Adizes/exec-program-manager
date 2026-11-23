@@ -8,7 +8,7 @@ function shell() {
   var root = document.getElementById(ROOT_ID);
   resetRoot(root);
   var pm = isPM();
-  var nav = pm ? [['cohorts', 'Cohorts'], ['learners', 'Learners'], ['smes', 'SMEs'], ['team', 'Team'], ['settings', 'Settings']] : [['cohorts', 'My cohorts'], ['smes', 'My ratings']];
+  var nav = pm ? [['cohorts', 'Cohorts'], ['planner', 'Planner'], ['learners', 'Learners'], ['smes', 'SMEs'], ['team', 'Team'], ['settings', 'Settings']] : [['cohorts', 'My cohorts'], ['planner', 'Planner'], ['smes', 'My ratings']];
   var r = route();
   var active = r.name === 'c' ? 'cohorts' : r.name;
   var header = h('header.epm-top',
@@ -33,7 +33,7 @@ function render() {
   }
   var main = shell();
   var r = route();
-  var views = { cohorts: viewCohorts, c: viewCohort, learners: viewLearners, smes: viewSmes, team: viewTeam, settings: viewSettings };
+  var views = { cohorts: viewCohorts, c: viewCohort, planner: viewPlanner, learners: viewLearners, smes: viewSmes, team: viewTeam, settings: viewSettings };
   var fn = views[r.name] || viewCohorts;
   if (!isPM() && ['learners', 'team', 'settings'].indexOf(r.name) >= 0) fn = viewCohorts;
   fn(main, r);
@@ -109,7 +109,10 @@ function newCohortWizard() {
   var name = inputEl('', { placeholder: 'Cohort 8' }), code = inputEl('', { placeholder: 'C-AEP-108-27' });
   var lang = selectEl([{ value: 'en', label: 'English' }, { value: 'es', label: 'Spanish' }], 'en');
   var bundle = inputEl('', { placeholder: 'e.g. 783728' }), zoom = inputEl('', { placeholder: 'https://zoom.us/j/…' });
-  var source = selectEl([{ value: 'template', label: 'Default program template (' + B.template.length + ' blocks)' }].concat(B.cohorts.map(function (c) { return { value: c.id, label: 'Copy structure from ' + c.name }; })), 'template');
+  var source = selectEl([{ value: 'csv', label: 'Import the program calendar (CSV)' }, { value: 'template', label: 'Default program template (' + B.template.length + ' blocks)' }].concat(B.cohorts.map(function (c) { return { value: c.id, label: 'Copy structure from ' + c.name }; })), 'csv');
+  var calFile = h('input', { type: 'file', accept: '.csv,text/csv' });
+  var calField = field('Calendar CSV', calFile, 'In the Calendar sheet: File → Download → CSV. Dates, courses, modules and SMEs come from the file.');
+  var dateFields;
   var welcome = inputEl('', { type: 'date' }), first = inputEl('', { type: 'date' });
   var days = h('.epm-checks', [1, 2, 3, 4, 5, 6].map(function (d) { return h('label.epm-check', h('input', { type: 'checkbox', value: String(d), checked: d === 1 || d === 3 }), h('span', WD[d])); }));
   var skip = textareaEl('', { rows: 3, placeholder: 'Holiday weeks: one date per line (YYYY-MM-DD). The whole week is skipped.' });
@@ -117,6 +120,14 @@ function newCohortWizard() {
   var structure = null;
   function buildStructure() {
     var wd = Array.prototype.slice.call(days.querySelectorAll('input:checked')).map(function (i) { return Number(i.value); });
+    var csv = source.value === 'csv';
+    calField.style.display = csv ? '' : 'none';
+    if (dateFields) dateFields.forEach(function (f) { f.style.display = csv ? 'none' : ''; });
+    if (csv) {
+      if (!calFile.files[0]) { preview.textContent = 'Choose the calendar CSV.'; return Promise.resolve(null); }
+      return readCalendarFile(calFile).then(function (st) { structure = st; preview.textContent = structureSummary(st); return st; })
+        .catch(function (e) { preview.textContent = e.message; throw e; });
+    }
     var getSrc = source.value === 'template' ? Promise.resolve(templateStructure(B.template)) : loadCohort(source.value).then(copyStructure);
     return getSrc.then(function (st) {
       var regular = st.sessions.filter(function (s) { return st.blocks.find(function (b) { return b.key === s.blockKey; }).kind !== 'welcome'; });
@@ -129,20 +140,23 @@ function newCohortWizard() {
       return st;
     });
   }
-  [source, welcome, first, skip].forEach(function (x) { x.addEventListener('change', function () { buildStructure().catch(fail); }); });
+  [source, welcome, first, skip, calFile].forEach(function (x) { x.addEventListener('change', function () { buildStructure().catch(function () {}); }); });
   days.addEventListener('change', function () { buildStructure().catch(fail); });
-  buildStructure();
+  var row1 = h('.epm-row2', field('Welcome session date', welcome), field('First module session', first)), fDays = field('Session days', days), fSkip = field('Weeks without sessions', skip);
+  dateFields = [row1, fDays, fSkip];
+  buildStructure().catch(function () {});
   var m = modal('New cohort', [
     h('.epm-row3', field('Name', name), field('Code', code), field('Language', lang, 'All learner emails and forms use this language.')),
     h('.epm-row2', field('Teachable bundle ID', bundle), field('Zoom link', zoom)),
-    field('Structure', source, 'You can edit blocks, titles, SMEs and dates afterwards in the cohort Settings.'),
-    h('.epm-row2', field('Welcome session date', welcome), field('First module session', first)),
-    field('Session days', days), field('Weeks without sessions', skip), preview], {
+    field('Structure', source, 'You can edit blocks, titles, SMEs and dates afterwards in the cohort Settings.'), calField,
+    row1, fDays, fSkip, preview], {
     wide: true,
     footer: [btn('Cancel', { kind: 'ghost' }, function () { m.close(); }), btn('Create cohort', { kind: 'primary' }, function () {
       if (!name.value.trim()) return toast('Give the cohort a name', 'error');
       buildStructure().then(function (st) {
-        return api('cohort.create', { data: { name: name.value, code: code.value, language: lang.value, startDate: welcome.value || first.value, teachableBundleId: bundle.value, zoomLink: zoom.value, status: 'Planned' }, structure: st });
+        if (!st) throw new Error('Choose the calendar CSV (or another structure)');
+        var ds = st.sessions.map(function (s) { return s.date; }).filter(Boolean).sort();
+        return api('cohort.create', { data: { name: name.value, code: code.value, language: lang.value, startDate: welcome.value || first.value || ds[0] || '', teachableBundleId: bundle.value, zoomLink: zoom.value, status: 'Planned' }, structure: st });
       }).then(function (r) { m.close(); toast('Cohort created'); return refreshBoot().then(function () { go('c/' + r.id + '/settings'); }); }).catch(fail);
     })],
   });
@@ -151,7 +165,7 @@ function templateStructure(tpl) {
   var blocks = [], sessions = [];
   tpl.forEach(function (b, i) {
     var key = 'b' + i;
-    blocks.push({ key: key, kind: b.kind, number: b.number, title: b.title, smeName: b.smeName || '', smeEmail: matchSmeEmail(b.smeName) });
+    blocks.push({ key: key, kind: b.kind, number: b.number, title: b.title, smeName: b.smeName || '', smeEmail: matchSmeEmail(b.smeName), smeSeesFeedback: true });
     b.modules.forEach(function (mo) { for (var k = 0; k < (mo.sessions || 2); k++) sessions.push({ blockKey: key, moduleNo: mo.no, moduleTitle: mo.title }); });
   });
   return { blocks: blocks, sessions: sessions };
@@ -184,6 +198,7 @@ function learnerDrawer(ctx, email) {
   var nav = h('.epm-subtabs');
   var pane = h('div');
   append(body, [
+    pm ? h('.epm-actions.epm-drawer-actions', btn('Progress report (PDF)', { icon: 'down', kind: 'ghost' }, function () { reportModal(ctx, email); })) : null,
     h('.epm-drawer-sum', statusBadge(e.status, e), h('span', 'Attendance ', pctCell(st.att)), h('span', 'LMS ', pctCell(st.lms)), st.exp != null ? h('span', 'Rating ' + num(st.exp) + '/5') : null,
       st.risk.length ? badge('Needs attention', 'bad') : null),
     nav, pane]);
@@ -217,11 +232,13 @@ function learnerDrawer(ctx, email) {
           var patch = { profile: prof.getValues() }; Object.keys(F).forEach(function (k) { patch[k] = F[k].value; });
           saveLearner(patch).then(function (r) { m.close(); delete S.cohorts[ctx.id]; go('c/' + ctx.id + '/learners/' + encodeURIComponent(r.email)); }).catch(fail);
         })),
-        h('.epm-card.epm-card-flat', h('h4', 'Personal profile link'), h('p.epm-small.epm-muted', l.profileSubmittedAt ? 'Completed on ' + fmtDateTime(l.profileSubmittedAt) + '. The learner can open it again to update.' : 'Not completed yet.'),
+        h('.epm-card.epm-card-flat', h('h4', 'Registration form'), h('p.epm-small.epm-muted', l.profileSubmittedAt ? 'Registered on ' + fmtDateTime(l.profileSubmittedAt) + '. Answering again with the same email updates the data.' : 'Not registered yet.'),
+          h('.epm-actions', btn('Copy their link', { icon: 'copy', kind: 'ghost', title: 'The cohort registration link with their email filled in' }, function () {
+            var u = ctx.C.registrationLink; copyText(u ? u + (u.indexOf('?') >= 0 ? '&' : '?') + 'e=' + encodeURIComponent(email) : '');
+          }), btn('Email the form', { icon: 'mail', kind: 'ghost' }, function () { m.close(); emailComposer(ctx, [email], 'registration'); }))),
+        h('.epm-card.epm-card-flat', h('h4', 'Goals & intentions link'), h('p.epm-small.epm-muted', 'Personal link where the learner answers the Goals & intentions questions.'),
           h('.epm-actions', btn('Copy link', { icon: 'copy', kind: 'ghost' }, function () { copyText(l.profileLink); }),
-            btn('Email the link', { icon: 'mail', kind: 'ghost' }, function () {
-              api('learner.sendProfileLink', { cohortId: ctx.id, email: email }).then(function () { toast('Link sent and logged'); delete S.cohorts[ctx.id]; }).catch(fail);
-            })))]);
+            btn('Email the link', { icon: 'mail', kind: 'ghost' }, function () { m.close(); emailComposer(ctx, [email], 'goals'); })))]);
     }
     if (cur === 'program') {
       var status = selectEl(O.enrollmentStatus.concat(O.enrollmentStatus.indexOf(e.status) < 0 ? [e.status] : []), e.status), wes = h('input', { type: 'checkbox', checked: !!e.welcomeEmailSent });
@@ -233,7 +250,11 @@ function learnerDrawer(ctx, email) {
       append(pane, [
         h('.epm-row2', field('Status in ' + C.cohort.name, status), sinceField),
         h('.epm-row2', field('Certification sent', cert), h('span')),
-        h('.epm-row2', field('Welcome kit sent', kit), field('Books code', books)),
+        h('.epm-row2', field('Welcome kit sent', kit), field('Books code', h('.epm-inline', books,
+          btn('', { icon: 'mail', kind: 'ghost', aria: 'Email the books code', title: 'Email the books code to the learner' }, function () {
+            if (books.value.trim() !== (l.booksCode || '')) return toast('Save the books code first', 'error');
+            booksCodeEmail(ctx, l);
+          })))),
         h('label.epm-check', wes, h('span', 'Welcome email sent')),
         (setTimeout(syncSince, 0), null),
         h('.epm-actions', btn('Save', { kind: 'primary' }, function () {
@@ -432,8 +453,11 @@ function viewSettings(main) {
   main.appendChild(h('.epm-card', h('h3', 'Integrations'),
     h('ul.epm-int', h('li', I.teachable ? badge('Connected', 'good') : badge('Not configured', 'bad'), ' Teachable — progress syncs every night for Active cohorts, or from each cohort’s LMS tab.'),
       h('li', I.typeform ? badge('Connected', 'good') : badge('Not configured', 'bad'), ' Typeform — responses are pulled every night. Last pull: ' + (st.typeformLastSync ? fmtDateTime(st.typeformLastSync) : 'never'),
-        I.typeform ? h('span', ' ', btn('Pull now', { icon: 'sync', kind: 'ghost' }, function () { api('typeform.sync', {}).then(function (r) { toast(r.imported + ' new responses'); S.cohorts = {}; }).catch(fail); })) : null)),
+        I.typeform ? h('span', ' ', btn('Pull now', { icon: 'sync', kind: 'ghost' }, function () { api('typeform.sync', {}).then(function (r) { toast(r.imported + ' new responses'); S.cohorts = {}; }).catch(fail); })) : null),
+      h('li', I.sender && I.sender.ok ? badge('OK', 'good') : badge('Wrong account', 'bad'), ' Emails leave from ', h('b', I.sender ? I.sender.from : '—'),
+        I.sender && !I.sender.ok ? h('div.epm-small.epm-t-low', 'The Apps Script runs as ' + I.sender.runsAs + '. Redeploy it signed in as ' + I.sender.from + ' (Deploy → New deployment, Execute as: Me) — nothing is sent until then.') : null)),
     h('p.epm-small.epm-muted', 'Keys are stored in the Apps Script project (Project Settings → Script Properties), never in this page.')));
+  main.appendChild(templatesCard());
   // import
   var files = h('input', { type: 'file', accept: '.json,application/json', multiple: true });
   var replace = h('input', { type: 'checkbox' });

@@ -105,20 +105,44 @@ Qué hace la plataforma con el archivo:
 Si alguien entró con otro nombre (por ejemplo, "iPhone de Ana"), le asignas quién es una vez y la plataforma lo recuerda.
 
 ### Correos
-Salen de execprogram@ en el idioma del cohort y quedan registrados en **Conversations**.
+Todos salen de **execprogram@adizes.com**, en el idioma del cohort, y quedan registrados en **Conversations**. Por eso la app web debe estar implementada **con la cuenta execprogram@**, o con una cuenta que tenga ese correo como alias de Gmail. En **Settings → Integrations** se ve si el remitente está bien. Si no lo está, la plataforma no envía nada.
 
-| Plantilla | Estado |
-|---|---|
-| Perfil / Goals | Lista |
-| Module feedback | Lista |
-| Correo libre | Lista |
-| Certificado | Texto pendiente; se edita en `EMAILS` dentro de `Code.gs` |
-| Tutorial de LinkedIn | Texto pendiente; se edita en `EMAILS` dentro de `Code.gs` |
+Todos los envíos (manuales y automáticos) tienen el botón **Send test to me**. Manda la versión del primer destinatario solo a ti, con "[TEST]" en el asunto, y no se registra.
+
+Los textos se editan sin tocar código en **Settings → Email templates** (inglés y español). Las variables van entre llaves, por ejemplo `{first}` o `{cohort}`. Mientras una plantilla esté marcada como *text pending*, no se envía de forma automática.
+
+| Plantilla | Para | Estado |
+|---|---|---|
+| Registration (formulario de inscripción) | Learner | Lista |
+| Goals & intentions | Learner | Lista |
+| Module feedback | Learner | Lista |
+| Books code | Learner | Texto pendiente |
+| Progress report (PDF adjunto) | Learner | Lista |
+| SME reminder (1 semana antes de su curso) | SME | Texto pendiente |
+| Certificate / LinkedIn | Learner | Texto pendiente |
+| Correo libre | Learner | Lista |
+
+**Recordatorio a SMEs:** cada día, a las 5 am, se manda un recordatorio a los SMEs cuyo curso empieza en los próximos 7 días, con el link del curriculum en Teachable y el de la plataforma. Se manda una sola vez por curso, y desde el calendario del cohort se puede reenviar o probar con **Remind SME**.
 
 ### Learners
-- **Agregar:** se da de alta a la persona con nombre y correo, y recibe su link personal.
+- **Formulario de inscripción:** en **Learners → Registration form** está el link del cohort. Si alguien lo envía de nuevo con el mismo correo, sus datos se actualizan, sin duplicados, y nunca se tocan PAEI ni Lifecycle.
+- **Agregar a mano:** solo nombre y correo. No se manda ningún correo.
+- **Goals & intentions:** se manda desde el panel del learner (pestaña Profile) cuando la PM lo decida.
+- **Reporte de avance (PDF):** en el panel del learner, **Progress report (PDF)**. Se puede descargar, ver o mandar por correo con asunto y texto editables. Se genera con los datos del día.
 - **Mover de cohort:** abre al learner y entra a **Program**. Su historial se conserva.
-- **Dar de baja:** cambia su estatus a *Dropped Out*.
+- **Dar de baja:** cambia su estatus a *Dropped Out* e indica la fecha. Su asistencia cuenta en las sesiones anteriores a esa fecha y deja de contar después. Ya no entra en el % general del cohort.
+
+### Calendario e importaciones
+- **Nuevo cohort desde el calendario:** en el Sheet de calendario, ve a *Archivo → Descargar → CSV* y elige ese archivo en **New cohort**. Se saltan Onboarding y las semanas de descanso; el SME sale de la segunda línea de la celda del curso. Los IDs de Teachable se llenan después en Settings.
+- **Reemplazar el calendario de un cohort:** **Settings → Import calendar CSV**.
+- **Session feedback:** **Feedback → Import CSV** reemplaza todo el session feedback del cohort con el del archivo.
+
+### Planner
+Lo ven todos (PM y SMEs).
+- **Timeline:** todos los cohorts, con una barra por curso.
+- **Month:** todas las sesiones del mes.
+- **SME availability:** qué imparte cada SME y cuándo, sus días libres y los choques (el mismo SME en dos cohorts el mismo día). Cada SME puede registrar sus propios días libres.
+- **Cohort drafts** (solo PM): para planear un cohort nuevo con fechas, orden de cursos y SMEs. Muestra los choques al momento. Cuando quede listo, **Create cohort from this draft** crea el cohort real.
 
 ---
 
@@ -127,7 +151,7 @@ Salen de execprogram@ en el idioma del cohort y quedan registrados en **Conversa
 **Si cambió la página (carpeta `src/`):**
 1. Ejecuta `npm run build` y `npm test`, y haz commit.
 2. Crea un release nuevo, por ejemplo `v1.0.1`.
-3. En los dos Code Embeds de Webflow, cambia `@v1.0.0` por la versión nueva y publica.
+3. En los dos Code Embeds de Webflow, cambia la versión (por ejemplo `@v1.2.0`) por la nueva y publica.
 
 **Si cambió `apps-script/Code.gs`:**
 1. Pégalo en el editor de Apps Script.
