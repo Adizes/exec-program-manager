@@ -1269,7 +1269,8 @@ function emailShell_(lang, inner, staff) {
 }
 
 // Every email leaves from CONFIG.EMAIL.FROM_ADDRESS: either the script runs as that account,
-// or that address is a "Send mail as" alias of the account that runs it. Otherwise nothing is sent.
+// or that address is a "Send mail as" alias of the account that runs it (e.g. execprogram@ is a Google
+// Group and the PM who deploys has it as an alias in Gmail). Otherwise nothing is sent.
 function senderStatus_() {
   const cache = CacheService.getScriptCache();
   const hit = cache.get('sender_status');
@@ -1283,7 +1284,7 @@ function senderStatus_() {
     mode = aliases.indexOf(from) >= 0 ? 'alias' : 'wrong';
   }
   const st = { runsAs: runsAs, from: from || runsAs, ok: mode !== 'wrong', mode: mode };
-  cache.put('sender_status', JSON.stringify(st), 3600);
+  cache.put('sender_status', JSON.stringify(st), st.ok ? 3600 : 60);   // re-check soon after fixing the alias
   return st;
 }
 function sendMail_(to, subject, plain, html, attachments) {
