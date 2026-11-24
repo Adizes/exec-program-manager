@@ -78,6 +78,8 @@ const DEFAULT_SETTINGS = {
   typeformModuleFormId_en: '',
   typeformModuleFormId_es: '',
   typeformLastSync: '',
+  linkedinGuideUrl: '',           // Google Drive link of the LinkedIn Guide (PDF), attached to the LinkedIn and certificate emails
+  endSurveyUrl: '',               // End of Program Survey link (certificate email)
   schemaVersion: '1',
 };
 
@@ -90,7 +92,7 @@ const SCHEMA = {
   Settings: { key: 'key', cols: ['key', 'value'] },
   Cohorts: {
     key: 'id', cols: ['id', 'name', 'code', 'language', 'startDate', 'status', 'teachableBundleId', 'zoomMeetingId', 'zoomLink',
-      'moduleFeedbackFormId', 'notes', 'createdAt', 'updatedAt', 'lastLmsSync', 'lastLmsSyncResult', 'regToken'],
+      'moduleFeedbackFormId', 'notes', 'createdAt', 'updatedAt', 'lastLmsSync', 'lastLmsSyncResult', 'regToken', 'certFolderUrl'],
   },
   Blocks: {
     key: 'id', cols: ['id', 'cohortId', 'order', 'kind', 'number', 'title', 'smeEmail', 'smeName', 'smeSeesFeedback', 'teachableCourseId', 'reminderSentAt'],
@@ -107,7 +109,7 @@ const SCHEMA = {
   },
   Enrollments: {
     key: 'id', cols: ['id', 'email', 'cohortId', 'status', 'welcomeEmailSent', 'certificationSent', 'teachableUserId', 'statusChangedAt',
-      'movedFromCohortId', 'movedToCohortId', 'createdAt', 'statusDate'],
+      'movedFromCohortId', 'movedToCohortId', 'createdAt', 'statusDate', 'certificateUrl', 'certificateDate'],
     types: { welcomeEmailSent: 'b' },
   },
   Attendance: { key: 'id', cols: ['id', 'cohortId', 'sessionId', 'email', 'status', 'minutes', 'source', 'updatedAt'], types: { minutes: 'n' } },
@@ -200,9 +202,13 @@ const EMAILS = {
       cta: 'Responder la encuesta' },
   },
   booksCode: {
-    label: 'Books code', to: 'learner', vars: ['first', 'cohort', 'code'], category: 'Books', pending: true,
-    en: { subject: 'Adizes Executive Program · Your books code', body: 'Hi {first},\n\nYour books code is: {code}\n\n[PENDING TEXT — instructions to redeem the books]', cta: '' },
-    es: { subject: 'Adizes Executive Program · Tu código de libros', body: 'Hola, {first}:\n\nTu código de libros es: {code}\n\n[TEXTO PENDIENTE — instrucciones para canjear los libros]', cta: '' },
+    label: 'Books code (ebooks)', to: 'learner', vars: ['first', 'cohort', 'code', 'sender'], category: 'Books',
+    en: { subject: 'Unlock Your Exclusive Access to Dr. Ichak Adizes\' Ebooks',
+      body: 'Dear {first},\n\nWelcome to the Adizes Executive Program! We are thrilled to have you on board as part of this prestigious journey toward mastering leadership and organizational transformation.\n\nAs a valued participant, you now have exclusive access to the complete collection of ebooks by Dr. Ichak Adizes. This library covers decades of insights, providing you with the tools and knowledge to navigate complex management challenges effectively.\n\nTo download the ebooks, simply use your unique code below:\n**Your Code: {code}**\n\n[Download your ebooks here](https://publications.adizes.com/)\n\nTo get the books, you need to add them to the cart and use your code at checkout. The books will arrive in your email after checkout. It is important that you use the email you registered with.\n\nWe hope you enjoy these resources as you dive into the Adizes methodology, and we look forward to supporting you throughout the program.\n\nIf you have any questions or need assistance, feel free to reach out.\n\nWarm regards,\n{sender}',
+      cta: '' },
+    es: { subject: 'Tu acceso exclusivo a los ebooks del Dr. Ichak Adizes',
+      body: 'Hola, {first}:\n\n¡Te damos la bienvenida al Adizes Executive Program! Nos da mucho gusto que formes parte de este recorrido hacia el dominio del liderazgo y la transformación organizacional.\n\nComo participante, ahora tienes acceso exclusivo a la colección completa de ebooks del Dr. Ichak Adizes. Esta biblioteca reúne décadas de conocimiento y te da las herramientas para enfrentar con eficacia los retos de gestión más complejos.\n\nPara descargar los ebooks, usa tu código personal:\n**Tu código: {code}**\n\n[Descarga tus ebooks aquí](https://publications.adizes.com/)\n\nPara obtener los libros, agrégalos al carrito y usa tu código al pagar. Los libros llegarán a tu correo después de completar la compra. Es importante que uses el correo con el que te registraste.\n\nEsperamos que disfrutes estos recursos mientras te adentras en la metodología Adizes. Te acompañaremos durante todo el programa.\n\nSi tienes alguna pregunta o necesitas ayuda, escríbenos.\n\nSaludos cordiales,\n{sender}',
+      cta: '' },
   },
   progressReport: {
     label: 'Progress report (PDF attached)', to: 'learner', vars: ['first', 'cohort'], category: 'Other',
@@ -212,14 +218,22 @@ const EMAILS = {
       body: 'Hola, {first}:\n\nTe compartimos tu reporte de avance del Adizes Executive Program ({cohort}): asistencia, avance en el LMS y los cursos que siguen.\n\nSi necesitas ayuda con algo, responde a este correo.', cta: '' },
   },
   certificate: {
-    label: 'Certificate', to: 'learner', vars: ['first', 'cohort'], category: 'Other', pending: true,
-    en: { subject: 'Adizes Executive Program · Your certificate', body: 'Hi {first},\n\n[PENDING TEXT — certificate email]', cta: '' },
-    es: { subject: 'Adizes Executive Program · Tu certificado', body: 'Hola, {first}:\n\n[TEXTO PENDIENTE — correo del certificado]', cta: '' },
+    label: 'Certificate (PDF + LinkedIn Guide attached)', to: 'learner', vars: ['first', 'cohort', 'cohortCode', 'certificateDate', 'certificateLink', 'surveyLink', 'sender'], category: 'Other',
+    en: { subject: 'Your Official Adizes Executive Program Certificate',
+      body: 'Dear {first},\n\nWe are pleased to share your official certificate for the Adizes Executive Program — Cohort {cohortCode}, recognizing your successful completion of the 50-week program on the Adizes Methodology.\n\nDated {certificateDate}, your certificate reflects not only the completion of the program but also your commitment to developing integrative leadership and strengthening organizational effectiveness.\n\nYour certificate is attached to this email and is also available through the link below:\n👉 [Download Certificate (PDF)]({certificateLink})\n\nWe also encourage you to add the Adizes Executive Program to your LinkedIn profile and share this achievement with your network. To make this easier, we have attached a step-by-step LinkedIn Guide with the recommended information and instructions for adding the program under the Education section of your profile and including your certificate.\n\nYour dedication and participation have been an important part of the program, and it has been a pleasure to accompany you throughout this journey.\n\nWe would also appreciate it if you could take a few minutes to complete our End of Program Survey. Your feedback is very valuable to us and helps us continue improving the experience for future cohorts.\n👉 [Complete the End of Program Survey]({surveyLink})\n\nAs you move forward, please know that the Adizes team and I are always here for you. If there is ever anything we can support you with, please don’t hesitate to reach out.\n\nCongratulations once again on completing the Adizes Executive Program.\n\nWarm regards,\n{sender}',
+      cta: '' },
+    es: { subject: 'Tu certificado oficial del Adizes Executive Program',
+      body: 'Hola, {first}:\n\nNos da mucho gusto compartirte tu certificado oficial del Adizes Executive Program — Cohort {cohortCode}, que reconoce que concluiste con éxito el programa de 50 semanas sobre la Metodología Adizes.\n\nCon fecha del {certificateDate}, tu certificado refleja no solo que completaste el programa, sino también tu compromiso con desarrollar un liderazgo integrador y fortalecer la efectividad de tu organización.\n\nTu certificado viene adjunto en este correo y también puedes descargarlo aquí:\n👉 [Descargar certificado (PDF)]({certificateLink})\n\nTe invitamos también a agregar el Adizes Executive Program a tu perfil de LinkedIn y compartir este logro con tu red. Para facilitarlo, adjuntamos una guía paso a paso con la información recomendada y las instrucciones para agregar el programa en la sección de Educación de tu perfil e incluir tu certificado.\n\nTu dedicación y participación fueron muy importantes para el programa, y ha sido un gusto acompañarte en este recorrido.\n\nTambién te agradeceríamos mucho que te tomaras unos minutos para responder nuestra encuesta de fin de programa. Tus comentarios son muy valiosos y nos ayudan a seguir mejorando la experiencia de las siguientes generaciones.\n👉 [Responder la encuesta de fin de programa]({surveyLink})\n\nDe aquí en adelante, ten presente que el equipo de Adizes y yo estamos siempre para ti. Si en algún momento podemos apoyarte en algo, no dudes en escribirnos.\n\nFelicidades de nuevo por concluir el Adizes Executive Program.\n\nSaludos cordiales,\n{sender}',
+      cta: '' },
   },
   linkedin: {
-    label: 'LinkedIn tutorial', to: 'learner', vars: ['first', 'cohort'], category: 'Other', pending: true,
-    en: { subject: 'Adizes Executive Program · Add the program to your LinkedIn', body: 'Hi {first},\n\n[PENDING TEXT — LinkedIn tutorial]', cta: '' },
-    es: { subject: 'Adizes Executive Program · Agrega el programa a tu LinkedIn', body: 'Hola, {first}:\n\n[TEXTO PENDIENTE — tutorial de LinkedIn]', cta: '' },
+    label: 'Add the program to LinkedIn (guide attached)', to: 'learner', vars: ['first', 'cohort', 'sender'], category: 'Other',
+    en: { subject: 'Add the Adizes Executive Program to your LinkedIn',
+      body: 'Dear {first},\n\nAs you begin your journey with the Adizes Executive Program, we encourage you to celebrate this new step in your professional development by adding the program to the Education section of your LinkedIn profile and sharing the news with your network.\n\nThis is a great opportunity to highlight your commitment to continuous learning, leadership development, and organizational transformation while connecting with other professionals who share similar interests.\n\nTo make this easier, we\'ve attached a step-by-step LinkedIn Guide with the recommended information and instructions for adding the program to your profile.\n\nWe also encourage you to share a post announcing the start of your journey and tag Adizes Institute Worldwide!\n\nWe look forward to accompanying you throughout this learning experience and celebrating your achievements along the way.\n\nWarm regards,\n{sender}',
+      cta: '' },
+    es: { subject: 'Agrega el Adizes Executive Program a tu LinkedIn',
+      body: 'Hola, {first}:\n\nAhora que comienzas tu recorrido en el Adizes Executive Program, te invitamos a celebrar este nuevo paso en tu desarrollo profesional agregando el programa a la sección de Educación de tu perfil de LinkedIn y compartiendo la noticia con tu red.\n\nEs una gran oportunidad para mostrar tu compromiso con el aprendizaje continuo, el desarrollo de liderazgo y la transformación organizacional, y para conectar con otros profesionales con intereses similares.\n\nPara facilitarlo, adjuntamos una guía paso a paso con la información recomendada y las instrucciones para agregar el programa a tu perfil.\n\n¡También te invitamos a publicar un post para anunciar el inicio de tu recorrido y etiquetar a Adizes Institute Worldwide!\n\nNos da mucho gusto acompañarte en esta experiencia de aprendizaje y celebrar tus logros a lo largo del camino.\n\nSaludos cordiales,\n{sender}',
+      cta: '' },
   },
   smeReminder: {
     label: 'SME reminder (1 week before the course)', to: 'sme', vars: ['sme', 'course', 'cohort', 'startDate', 'sessions', 'curriculumLink', 'portalLink'], category: 'Other', pending: true,
@@ -605,7 +619,7 @@ function cohortUpdate_(b) {
   if (!c) throw new Error('not_found');
   const p = b.patch || {};
   const patch = { updatedAt: new Date().toISOString() };
-  ['name', 'code', 'teachableBundleId', 'zoomMeetingId', 'zoomLink', 'moduleFeedbackFormId', 'notes'].forEach(k => { if (k in p) patch[k] = clean_(p[k], k === 'notes' ? 2000 : 300); });
+  ['name', 'code', 'teachableBundleId', 'zoomMeetingId', 'zoomLink', 'moduleFeedbackFormId', 'notes', 'certFolderUrl'].forEach(k => { if (k in p) patch[k] = clean_(p[k], k === 'notes' ? 2000 : 300); });
   if ('startDate' in p) patch.startDate = cleanDate_(p.startDate);
   if ('language' in p && OPTIONS.languages.indexOf(p.language) >= 0) patch.language = p.language;
   if ('status' in p && OPTIONS.cohortStatus.indexOf(p.status) >= 0) patch.status = p.status;
@@ -785,6 +799,8 @@ function enrollmentUpdate_(b) {
   if ('welcomeEmailSent' in p) patch.welcomeEmailSent = !!p.welcomeEmailSent;
   if ('certificationSent' in p) patch.certificationSent = OPTIONS.certification.indexOf(p.certificationSent) >= 0 ? p.certificationSent : '';
   if ('teachableUserId' in p) patch.teachableUserId = clean_(p.teachableUserId, 20);
+  if ('certificateUrl' in p) patch.certificateUrl = clean_(p.certificateUrl, 300);
+  if ('certificateDate' in p) patch.certificateDate = cleanDate_(p.certificateDate) || '';
   update_('Enrollments', e.id, patch);
   return { ok: true, enrollment: strip_(Object.assign({}, e, patch)) };
 }
@@ -1093,7 +1109,9 @@ function sampleVars_(key, lang, user) {
   return { first: (user.name || 'Test').split(' ')[0], cohort: es ? 'Cohort 1 SPA' : 'Cohort 7', link: CONFIG.LEARNER_URL, module: es ? 'Fundamentos de CAPI' : 'Foundations of CAPI',
     code: 'ABCD123', sme: (user.name || 'Test').split(' ')[0], course: 'Foundations of CAPI for Decision Implementation', startDate: es ? 'lunes 4 de enero de 2027' : 'Monday, January 4, 2027',
     sessions: '· Mon 4 Jan 27 · 3.1 Establishing Control Over a Problem\n· Wed 6 Jan 27 · 3.1 Establishing Control Over a Problem',
-    curriculumLink: fill_(CONFIG.TEACHABLE_CURRICULUM_URL, { id: '2930596' }), portalLink: CONFIG.PORTAL_URL };
+    curriculumLink: fill_(CONFIG.TEACHABLE_CURRICULUM_URL, { id: '2930596' }), portalLink: CONFIG.PORTAL_URL,
+    cohortCode: 'C-AEP-107-26', certificateDate: certDate_(today_(), lang), certificateLink: 'https://drive.google.com/', surveyLink: settings_().endSurveyUrl || 'https://www.adizes.com/',
+    sender: user.name || '' };
 }
 function templateTest_(b, user) {
   const key = String(b.key || ''), lang = b.lang === 'es' ? 'es' : 'en';
@@ -1107,18 +1125,30 @@ function templateTest_(b, user) {
 function deliver_(to, lang, text, vars, opts) {
   opts = opts || {};
   const v = vars || {};
-  let subject = fill_(text.subject, v), body = fill_(text.body, v);
+  if (!v.sender) v.sender = EMAIL_SIGN[lang];
+  const signed = /\{sender\}/.test(String(text.body));
+  let subject = fill_(text.subject, v);
+  // a line whose link is empty (e.g. no survey link configured) is left out
+  let body = String(fill_(text.body, v)).split('\n').filter(line => !/\]\(\s*\)/.test(line)).join('\n');
   if (!subject || !String(body).trim()) throw new Error('invalid_email_text');
   if (opts.test) subject = '[TEST] ' + subject;
-  const paras = String(body).split(/\n{2,}/).map(p => '<p style="margin:0 0 14px">' + linkify_(esc_(p)).replace(/\n/g, '<br>') + '</p>').join('');
+  const paras = String(body).split(/\n{2,}/).map(p => '<p style="margin:0 0 14px">' + richText_(p).replace(/\n/g, '<br>') + '</p>').join('');
   const link = v.link || v.portalLink;
   const cta = link && text.cta ? '<p style="margin:22px 0"><a href="' + esc_(link) + '" style="display:inline-block;background:#d7141a;color:#ffffff;font:700 15px Arial,sans-serif;text-decoration:none;padding:12px 22px;border-radius:4px">' + esc_(fill_(text.cta, v)) + ' &rarr;</a></p>' : '';
   const testBar = opts.test ? '<p style="margin:0 0 18px;padding:8px 12px;background:#fff3d6;color:#8a5a00;font:600 12px Arial,sans-serif;border-radius:4px">TEST · ' + (lang === 'es' ? 'así lo recibirá cada persona, con sus propios datos' : 'this is how each person will receive it, with their own details') + '</p>' : '';
-  const html = emailShell_(lang, testBar + paras + cta + '<p style="margin:22px 0 0">' + esc_(EMAIL_SIGN[lang]) + '</p>');
-  sendMail_(to, subject, body + (v.link ? '\n\n' + v.link : '') + '\n\n' + EMAIL_SIGN[lang], html, opts.attachments);
+  const html = emailShell_(lang, testBar + paras + cta + (signed ? '' : '<p style="margin:22px 0 0">' + esc_(EMAIL_SIGN[lang]) + '</p>'));
+  const plain = body.replace(/\*\*(.+?)\*\*/g, '$1').replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '$1: $2');
+  sendMail_(to, subject, plain + (v.link && text.cta ? '\n\n' + v.link : '') + (signed ? '' : '\n\n' + EMAIL_SIGN[lang]), html, opts.attachments || v._attachments);
   return subject;
 }
 function linkify_(html) { return html.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" style="color:#d7141a">$1</a>'); }
+// Plain text → HTML: [text](https://…) links, **bold**, bare URLs linked
+function richText_(p) {
+  const links = [];
+  let t = String(p).replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, (m, txt, url) => { links.push([txt, url]); return '\u0000' + (links.length - 1) + '\u0000'; });
+  t = linkify_(esc_(t)).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+  return t.replace(/\u0000(\d+)\u0000/g, (m, i) => '<a href="' + esc_(links[i][1]) + '" style="color:#d7141a;font-weight:700">' + esc_(links[i][0]) + '</a>');
+}
 
 // Variables of a learner-facing template for one learner
 function learnerVars_(key, cohort, l, b) {
@@ -1142,7 +1172,76 @@ function learnerVars_(key, cohort, l, b) {
     if (!l.booksCode) throw new Error('invalid_no_books_code');
     vars.code = l.booksCode;
   }
+  if (key === 'linkedin' || key === 'certificate') {
+    const guide = linkedinGuide_();
+    if (!guide) throw new Error('invalid_no_linkedin_guide');
+    vars._attachments = [guide];
+  }
+  if (key === 'certificate') {
+    const e = rows_('Enrollments').find(x => x.cohortId === cohort.id && x.email === l.email) || {};
+    const file = certificateFile_(cohort, e, l);
+    if (!file) throw new Error('invalid_no_certificate');
+    const lang = cohort.language === 'es' ? 'es' : 'en';
+    vars.cohortCode = cohort.code || cohort.name;
+    vars.certificateDate = certDate_(e.certificateDate || today_(), lang);
+    vars.certificateLink = shareLink_(file, b && b.test);
+    vars.surveyLink = settings_().endSurveyUrl || '';
+    vars._attachments.unshift(file.getBlob());
+    vars._enrollmentId = e.id || '';
+  }
   return vars;
+}
+
+/* ----- files in Google Drive (certificates, LinkedIn Guide) ----- */
+function driveId_(url) { const m = String(url || '').match(/[-\w]{25,}/); return m ? m[0] : ''; }
+function driveFile_(url) {
+  const id = driveId_(url);
+  if (!id) throw new Error('invalid_drive_file');
+  try { return DriveApp.getFileById(id); } catch (e) { throw new Error('invalid_drive_file'); }
+}
+function linkedinGuide_() {
+  const url = settings_().linkedinGuideUrl;
+  if (!url) return null;
+  if (!MEMO_.__guide) MEMO_.__guide = driveFile_(url).getBlob();
+  return MEMO_.__guide;
+}
+// The learner's certificate: the link saved in their enrollment, or the PDF in the cohort's
+// certificates folder whose name contains their first and last name.
+function certificateFile_(cohort, e, l) {
+  if (e && e.certificateUrl) return driveFile_(e.certificateUrl);
+  if (!cohort.certFolderUrl) return null;
+  const key = '__cert:' + cohort.id;
+  if (!MEMO_[key]) {
+    const id = driveId_(cohort.certFolderUrl);
+    let folder;
+    try { folder = DriveApp.getFolderById(id); } catch (err) { throw new Error('invalid_drive_file'); }
+    const list = [], it = folder.getFiles();
+    while (it.hasNext()) { const f = it.next(); list.push({ name: normName_(String(f.getName()).replace(/\.[a-z0-9]+$/i, '')), file: f }); }
+    MEMO_[key] = list;
+  }
+  const first = normName_(l.firstName), last = normName_(l.lastName);
+  const has = (n, w) => w && (' ' + n + ' ').indexOf(' ' + w + ' ') >= 0;
+  const full = MEMO_[key].filter(x => has(x.name, first) && (!last || last.split(' ').every(w => has(x.name, w))));
+  if (full.length === 1) return full[0].file;
+  const byLast = MEMO_[key].filter(x => has(x.name, first) && last && has(x.name, last.split(' ')[0]));
+  return byLast.length === 1 ? byLast[0].file : null;
+}
+// A link the learner can open. The certificate is shared "anyone with the link (view)" unless the
+// domain does not allow it; then only the attachment is sent (the link line is left out).
+function shareLink_(file, test) {
+  const url = 'https://drive.google.com/file/d/' + file.getId() + '/view';
+  try {
+    const a = String(file.getSharingAccess());
+    if (a === 'ANYONE' || a === 'ANYONE_WITH_LINK') return url;
+    if (test) return url;
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    return url;
+  } catch (e) { return ''; }
+}
+function certDate_(iso, lang) {
+  const d = new Date(iso + 'T12:00:00Z');
+  const M = lang === 'es' ? ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'] : ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  return lang === 'es' ? d.getUTCDate() + ' de ' + M[d.getUTCMonth()] + ' de ' + d.getUTCFullYear() : M[d.getUTCMonth()] + ' ' + d.getUTCDate() + ', ' + d.getUTCFullYear();
 }
 
 // Sends a template (or custom) email to learners and logs a conversation per person.
@@ -1161,7 +1260,7 @@ function emailSend_(b, user) {
   if (b.test) {
     const l = rows_('Learners').find(x => x.email === emails[0]);
     if (!l) throw new Error('not_found');
-    deliver_(user.email, lang, text, learnerVars_(key, cohort, l, b), { test: true });
+    deliver_(user.email, lang, text, Object.assign(learnerVars_(key, cohort, l, Object.assign({}, b, { test: true })), { sender: user.name || '' }), { test: true });
     return { ok: true, test: true, to: user.email, sent: [], failed: [] };
   }
   const sent = [], failed = [];
@@ -1169,8 +1268,10 @@ function emailSend_(b, user) {
     const l = rows_('Learners').find(x => x.email === email);
     if (!l) { failed.push({ email: email, error: 'not_found' }); return; }
     try {
-      const subject = deliver_(l.email, lang, text, learnerVars_(key, cohort, l, b));
+      const vars = Object.assign(learnerVars_(key, cohort, l, b), { sender: user.name || '' });
+      const subject = deliver_(l.email, lang, text, vars);
       logEmail_(cohort.id, l.email, subject, EMAILS[key].category, user);
+      if (key === 'certificate' && vars._enrollmentId) update_('Enrollments', vars._enrollmentId, { certificationSent: 'Yes' });
       sent.push(email);
     } catch (e) { failed.push({ email: email, error: String(e.message || e) }); }
   });
@@ -1204,7 +1305,7 @@ function reportSend_(b, user) {
   const text = { subject: String(b.subject || '').trim() ? String(b.subject) : t.subject, body: String(b.body || '').trim() ? String(b.body) : t.body, cta: '' };
   const name = clean_(b.filename, 120).replace(/[^\w .-]/g, '') || 'Progress report.pdf';
   const blob = Utilities.newBlob(Utilities.base64Decode(b64), 'application/pdf', name);
-  const vars = { first: l.firstName || '', cohort: cohort.name };
+  const vars = { first: l.firstName || '', cohort: cohort.name, sender: user.name || '' };
   if (b.test) { deliver_(user.email, lang, text, vars, { test: true, attachments: [blob] }); return { ok: true, test: true, to: user.email }; }
   const subject = deliver_(l.email, lang, text, vars, { attachments: [blob] });
   logEmail_(cohort.id, l.email, subject, 'Other', user);
@@ -2063,6 +2164,7 @@ function setup() {
   ScriptApp.newTrigger('dailyJobs').timeBased().everyDays(1).atHour(5).create();
   // Touch the services once so Google asks for every permission now
   GmailApp.getAliases();
+  DriveApp.getRootFolder();
   CacheService.getScriptCache().get('x');
   const st = senderStatus_();
   Logger.log('Ready. Tables created; Program Managers: ' + pms.join(', ') + '. Daily sync scheduled at 5 am. ' +

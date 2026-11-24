@@ -116,11 +116,16 @@ Los textos se editan sin tocar código en **Settings → Email templates** (ingl
 | Registration (formulario de inscripción) | Learner | Lista |
 | Goals & intentions | Learner | Lista |
 | Module feedback | Learner | Lista |
-| Books code | Learner | Texto pendiente |
+| Books code (ebooks) | Learner | Lista (se puede enviar a varios a la vez) |
 | Progress report (PDF adjunto) | Learner | Lista |
 | SME reminder (1 semana antes de su curso) | SME | Texto pendiente |
-| Certificate / LinkedIn | Learner | Texto pendiente |
+| LinkedIn (con la guía adjunta) | Learner | Lista |
+| Certificate (certificado + guía adjuntos) | Learner | Lista |
 | Correo libre | Learner | Lista |
+
+**Firma:** las plantillas que terminan con `{sender}` se firman con el nombre de quien envía (el que aparece en **Team**).
+
+**Certificado y LinkedIn:** la guía de LinkedIn (PDF en Google Drive) y el link de la encuesta de fin de programa se configuran en **Settings**. Cada cohort tiene su carpeta de certificados en Drive (en la Settings del cohort): un PDF por learner con su nombre y apellido en el nombre del archivo. Al enviar el certificado se adjuntan el PDF y la guía, se comparte un link de solo lectura (si el dominio lo permite) y el learner queda con *Certification sent: Yes*. También se puede pegar el link del certificado de una persona en su pestaña **Program**.
 
 **Recordatorio a SMEs:** cada día, a las 5 am, se manda un recordatorio a los SMEs cuyo curso empieza en los próximos 7 días, con el link del curriculum en Teachable y el de la plataforma. Se manda una sola vez por curso, y desde el calendario del cohort se puede reenviar o probar con **Remind SME**.
 

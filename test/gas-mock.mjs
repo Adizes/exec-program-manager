@@ -56,6 +56,12 @@ export function loadGas(opts = {}) {
   const state = {
     sheets: {}, emails: [], fetches: [], triggers: [], props: Object.assign({}, opts.props || {}),
     cache: new FakeCache(), routes: opts.routes || (() => null), tz: 'America/Mexico_City', lastError: '',
+    drive: { files: {}, folders: {} },   // files: id → { name, access }, folders: id → [file ids]
+  };
+  const driveFile = (id) => {
+    const f = state.drive.files[id]; if (!f) throw new Error('Not found: ' + id);
+    return { getId: () => id, getName: () => f.name, getBlob: () => ({ name: f.name, getName: () => f.name, getContentType: () => 'application/pdf' }),
+      getSharingAccess: () => f.access || 'PRIVATE', setSharing: (a) => { if (f.noShare) throw new Error('domain policy'); f.access = a; } };
   };
   const ss = {
     getSheetByName: (n) => state.sheets[n] || null,
@@ -103,6 +109,15 @@ export function loadGas(opts = {}) {
     UrlFetchApp: {
       fetch: (url, o) => doFetch(url, o),
       fetchAll: (reqs) => reqs.map(r => doFetch(r.url, r)),
+    },
+    DriveApp: {
+      Access: { ANYONE_WITH_LINK: 'ANYONE_WITH_LINK', ANYONE: 'ANYONE', PRIVATE: 'PRIVATE' }, Permission: { VIEW: 'VIEW' },
+      getRootFolder: () => ({}),
+      getFileById: (id) => driveFile(id),
+      getFolderById: (id) => {
+        const ids = state.drive.folders[id]; if (!ids) throw new Error('Not found: ' + id);
+        let i = 0; return { getFiles: () => ({ hasNext: () => i < ids.length, next: () => driveFile(ids[i++]) }) };
+      },
     },
     ScriptApp: {
       getProjectTriggers: () => state.triggers,

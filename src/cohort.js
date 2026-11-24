@@ -641,7 +641,7 @@ function conversationModal(ctx, c) {
 function emailComposer(ctx, preselected, defaultTemplate) {
   var M = ctx.M, C = ctx.C, T = S.boot.emailTemplates || {};
   var lang = C.cohort.language === 'es' ? 'es' : 'en';
-  var keys = Object.keys(T).filter(function (k) { return T[k].to === 'learner' && k !== 'progressReport' && k !== 'booksCode'; });
+  var keys = Object.keys(T).filter(function (k) { return T[k].to === 'learner' && k !== 'progressReport'; });
   var tpl = selectEl(keys.map(function (k) { return { value: k, label: T[k].label + (T[k][lang] && T[k][lang].pending ? ' (text pending)' : '') }; }), defaultTemplate || 'custom');
   var blk = selectEl(C.blocks.filter(function (b) { return b.kind === 'course'; }).map(function (b) { return { value: b.id, label: blockLabel(b) }; }), '');
   var blkField = field('Module', blk);
@@ -689,11 +689,13 @@ function tabSettings(el, ctx) {
     status: selectEl(O.cohortStatus, c.status), startDate: inputEl(c.startDate, { type: 'date' }), teachableBundleId: inputEl(c.teachableBundleId),
     zoomMeetingId: inputEl(c.zoomMeetingId), zoomLink: inputEl(c.zoomLink, { placeholder: 'https://zoom.us/j/…' }), moduleFeedbackFormId: inputEl(c.moduleFeedbackFormId, { placeholder: 'Leave empty to use the default for the language' }),
     notes: textareaEl(c.notes, { rows: 2 }),
+    certFolderUrl: inputEl(c.certFolderUrl, { placeholder: 'https://drive.google.com/drive/folders/…' }),
   };
   el.appendChild(h('.epm-card', h('h3', 'Cohort details'),
     h('.epm-row3', field('Name', F.name), field('Code', F.code), field('Language (all learner emails & forms)', F.language)),
     h('.epm-row3', field('Status', F.status), field('Start date', F.startDate), field('Teachable bundle ID', F.teachableBundleId)),
     h('.epm-row3', field('Zoom meeting ID', F.zoomMeetingId), field('Zoom link', F.zoomLink), field('Typeform module form ID (optional)', F.moduleFeedbackFormId)),
+    field('Certificates folder (Google Drive)', F.certFolderUrl, 'One PDF per learner with their first and last name in the file name. The certificate email attaches it and shares a view link.'),
     field('Notes', F.notes),
     h('.epm-actions', btn('Save details', { kind: 'primary' }, function () {
       var patch = {}; Object.keys(F).forEach(function (k) { patch[k] = F[k].value; });

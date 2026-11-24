@@ -1,4 +1,4 @@
-/*! Adizes · Exec Program Manager v1.3.1 · github.com/Adizes/exec-program-manager */
+/*! Adizes · Exec Program Manager v1.4.0 · github.com/Adizes/exec-program-manager */
 (function(){
 'use strict';
 /* ---- core.js ---- */
@@ -6,7 +6,7 @@
  * CORE — config, API client, state, DOM helpers, router, UI primitives
  * =================================================================================== */
 var CFG = window.EPM_CONFIG || {};
-var VERSION = "1.3.1";
+var VERSION = "1.4.0";
 var ROOT_ID = CFG.mount || 'epm-app';
 var LS_KEY = 'epm_session_v1';
 
@@ -42,6 +42,9 @@ var ERRORS = {
   invalid_import_format: 'This file is not an import file from tools/migrate.py.',
   invalid_sender: 'Emails cannot leave from execprogram@adizes.com: the Apps Script must be deployed with that account (see Settings → Integrations).',
   invalid_no_books_code: 'This learner has no books code yet.',
+  invalid_no_certificate: 'No certificate found for this learner: add the certificates folder in the cohort Settings (file names with first and last name) or paste the certificate link in the learner’s Program tab.',
+  invalid_no_linkedin_guide: 'Add the LinkedIn Guide (Drive link) in Settings first: it is attached to this email.',
+  invalid_drive_file: 'The Google Drive link could not be opened. Check the link and that the account running the platform can see the file.',
   invalid_no_sme_email: 'This block has no SME with an account. Assign one in Settings → Structure.',
   invalid_too_many: 'Too many submissions. Please try again in a few minutes. · Demasiados envíos; intenta en unos minutos.',
   invalid_pdf: 'The PDF could not be attached.',
@@ -1299,7 +1302,7 @@ function conversationModal(ctx, c) {
 function emailComposer(ctx, preselected, defaultTemplate) {
   var M = ctx.M, C = ctx.C, T = S.boot.emailTemplates || {};
   var lang = C.cohort.language === 'es' ? 'es' : 'en';
-  var keys = Object.keys(T).filter(function (k) { return T[k].to === 'learner' && k !== 'progressReport' && k !== 'booksCode'; });
+  var keys = Object.keys(T).filter(function (k) { return T[k].to === 'learner' && k !== 'progressReport'; });
   var tpl = selectEl(keys.map(function (k) { return { value: k, label: T[k].label + (T[k][lang] && T[k][lang].pending ? ' (text pending)' : '') }; }), defaultTemplate || 'custom');
   var blk = selectEl(C.blocks.filter(function (b) { return b.kind === 'course'; }).map(function (b) { return { value: b.id, label: blockLabel(b) }; }), '');
   var blkField = field('Module', blk);
@@ -1347,11 +1350,13 @@ function tabSettings(el, ctx) {
     status: selectEl(O.cohortStatus, c.status), startDate: inputEl(c.startDate, { type: 'date' }), teachableBundleId: inputEl(c.teachableBundleId),
     zoomMeetingId: inputEl(c.zoomMeetingId), zoomLink: inputEl(c.zoomLink, { placeholder: 'https://zoom.us/j/…' }), moduleFeedbackFormId: inputEl(c.moduleFeedbackFormId, { placeholder: 'Leave empty to use the default for the language' }),
     notes: textareaEl(c.notes, { rows: 2 }),
+    certFolderUrl: inputEl(c.certFolderUrl, { placeholder: 'https://drive.google.com/drive/folders/…' }),
   };
   el.appendChild(h('.epm-card', h('h3', 'Cohort details'),
     h('.epm-row3', field('Name', F.name), field('Code', F.code), field('Language (all learner emails & forms)', F.language)),
     h('.epm-row3', field('Status', F.status), field('Start date', F.startDate), field('Teachable bundle ID', F.teachableBundleId)),
     h('.epm-row3', field('Zoom meeting ID', F.zoomMeetingId), field('Zoom link', F.zoomLink), field('Typeform module form ID (optional)', F.moduleFeedbackFormId)),
+    field('Certificates folder (Google Drive)', F.certFolderUrl, 'One PDF per learner with their first and last name in the file name. The certificate email attaches it and shares a view link.'),
     field('Notes', F.notes),
     h('.epm-actions', btn('Save details', { kind: 'primary' }, function () {
       var patch = {}; Object.keys(F).forEach(function (k) { patch[k] = F[k].value; });
@@ -2612,9 +2617,14 @@ function learnerDrawer(ctx, email) {
       var syncSince = function () { sinceField.style.display = NO_LIVE.indexOf(status.value) >= 0 ? '' : 'none'; if (status.value !== e.status && !e.statusDate) since.value = today(); };
       status.addEventListener('change', syncSince);
       var kit = selectEl([''].concat(O.welcomeKit), l.welcomeKit || ''), books = inputEl(l.booksCode), cert = selectEl([''].concat(O.certification), e.certificationSent || '');
+      var certUrl = inputEl(e.certificateUrl || '', { placeholder: 'Optional: Drive link of this certificate' }), certDate = inputEl(e.certificateDate || '', { type: 'date' });
       append(pane, [
         h('.epm-row2', field('Status in ' + C.cohort.name, status), sinceField),
-        h('.epm-row2', field('Certification sent', cert), h('span')),
+        h('.epm-row3', field('Certification sent', cert), field('Certificate date', certDate, 'Empty = the day it is sent'),
+          field('Certificate file', h('.epm-inline', certUrl, btn('', { icon: 'mail', kind: 'ghost', aria: 'Email the certificate', title: 'Email the certificate to the learner' }, function () {
+            if (certUrl.value.trim() !== (e.certificateUrl || '') || certDate.value !== (e.certificateDate || '')) return toast('Save the certificate first', 'error');
+            m.close(); emailComposer(ctx, [email], 'certificate');
+          })), C.cohort.certFolderUrl ? 'Empty = found by name in the cohort’s certificates folder' : 'Or set a certificates folder in the cohort Settings')),
         h('.epm-row2', field('Welcome kit sent', kit), field('Books code', h('.epm-inline', books,
           btn('', { icon: 'mail', kind: 'ghost', aria: 'Email the books code', title: 'Email the books code to the learner' }, function () {
             if (books.value.trim() !== (l.booksCode || '')) return toast('Save the books code first', 'error');
@@ -2623,7 +2633,7 @@ function learnerDrawer(ctx, email) {
         h('label.epm-check', wes, h('span', 'Welcome email sent')),
         (setTimeout(syncSince, 0), null),
         h('.epm-actions', btn('Save', { kind: 'primary' }, function () {
-          var patch = { status: status.value, welcomeEmailSent: wes.checked, certificationSent: cert.value };
+          var patch = { status: status.value, welcomeEmailSent: wes.checked, certificationSent: cert.value, certificateUrl: certUrl.value.trim(), certificateDate: certDate.value };
           if (NO_LIVE.indexOf(status.value) >= 0) patch.statusDate = since.value || today();
           Promise.all([api('enrollment.update', { id: e.id, patch: patch }),
             api('learner.update', { email: email, patch: { welcomeKit: kit.value, booksCode: books.value } })]).then(function () { toast('Saved'); m.close(); ctx.reload(); }).catch(fail);
@@ -2812,12 +2822,16 @@ function viewSettings(main) {
     presentThresholdPct: inputEl(st.presentThresholdPct, { type: 'number', min: '0', max: '100' }), riskAttendancePct: inputEl(st.riskAttendancePct, { type: 'number', min: '0', max: '100' }),
     riskLmsGapPct: inputEl(st.riskLmsGapPct, { type: 'number', min: '0', max: '100' }),
     typeformModuleFormId_en: inputEl(st.typeformModuleFormId_en, { placeholder: 'e.g. aBcD1234' }), typeformModuleFormId_es: inputEl(st.typeformModuleFormId_es),
+    linkedinGuideUrl: inputEl(st.linkedinGuideUrl, { placeholder: 'https://drive.google.com/file/d/…' }), endSurveyUrl: inputEl(st.endSurveyUrl, { placeholder: 'https://…' }),
   };
   main.appendChild(h('.epm-card', h('h3', 'Rules'),
     h('.epm-row3', field('Zoom: Present from (% of the session)', F.presentThresholdPct), field('At risk below attendance (%)', F.riskAttendancePct), field('At risk when LMS is behind by (points)', F.riskLmsGapPct)),
     h('h3', 'Typeform · Module feedback form'),
     h('p.epm-small.epm-muted', 'The form must have the hidden fields email, name, cohort and module. A cohort can override the form in its own settings.'),
     h('.epm-row2', field('Form ID (English cohorts)', F.typeformModuleFormId_en), field('Form ID (Spanish cohorts)', F.typeformModuleFormId_es)),
+    h('h3', 'Certificate & LinkedIn emails'),
+    h('p.epm-small.epm-muted', 'The LinkedIn Guide is a PDF in Google Drive; it is attached to the LinkedIn and certificate emails. Each cohort has its own certificates folder (cohort Settings).'),
+    h('.epm-row2', field('LinkedIn Guide (Drive link)', F.linkedinGuideUrl), field('End of Program Survey link', F.endSurveyUrl)),
     h('.epm-actions', btn('Save settings', { kind: 'primary' }, function () {
       var p = {}; Object.keys(F).forEach(function (k) { p[k] = F[k].value; });
       api('settings.save', { settings: p }).then(function (r) { S.boot.settings = r.settings; toast('Saved'); S.cohorts = {}; }).catch(fail);

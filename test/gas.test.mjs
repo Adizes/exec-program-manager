@@ -227,7 +227,7 @@ t('bulk conversation log for several learners', () => {
   assert.deepEqual(v.via, ['Whatsapp']);
 });
 t('pending templates are blocked; custom email is sent and logged', () => {
-  assert.equal(post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'] }).error, 'invalid_template_pending');
+  assert.equal(post({ action: 'sme.remind', token: pm, blockId: C.blocks.find(x => x.smeEmail).id }).error, 'invalid_template_pending');
   const n = state.emails.length;
   const r = post({ action: 'email.send', token: pm, cohortId: cid, template: 'custom', emails: ['ana@example.com'], subject: 'Hello {first}', body: 'Line one\n\n<b>Line two</b>' });
   assert.deepEqual(r.sent, ['ana@example.com']);
@@ -341,7 +341,6 @@ console.log('v1.3 emails, imports, reminders, planner');
 t('edited templates are used; test sends go only to me and are not logged', () => {
   reload();
   const before = C.conversations.length, n = state.emails.length;
-  assert.equal(post({ action: 'email.send', token: pm, cohortId: cid, template: 'booksCode', emails: ['ana@example.com'] }).error, 'invalid_template_pending');
   assert.equal(post({ action: 'templates.save', token: pm, key: 'booksCode', lang: 'en', subject: 'Books for {first}', body: 'Code: {code}', cta: '' }).ok, true);
   const r1 = post({ action: 'email.send', token: pm, cohortId: cid, template: 'booksCode', emails: ['ana@example.com'] });
   assert.equal(r1.failed[0].error, 'invalid_no_books_code');
@@ -355,8 +354,63 @@ t('edited templates are used; test sends go only to me and are not logged', () =
   assert.equal(C.conversations.length, before + 1, 'only the real send is logged');
   assert.equal(post({ action: 'templates.test', token: pm, key: 'smeReminder', lang: 'es' }).to, 'execprogram@adizes.com');
   assert.match(state.emails.at(-1).subject, /^\[TEST\] Recordatorio/);
-  assert.equal(post({ action: 'templates.save', token: pm, key: 'booksCode', lang: 'en', reset: true }).templates.booksCode.en.pending, true);
+  assert.equal(post({ action: 'templates.save', token: pm, key: 'booksCode', lang: 'en', reset: true }).templates.booksCode.en.subject, 'Unlock Your Exclusive Access to Dr. Ichak Adizes\' Ebooks');
   assert.ok(state.emails.length > n);
+});
+t('books code email: Dani\'s copy, bold code, link, signed by the sender', () => {
+  const n = state.emails.length;
+  assert.deepEqual(post({ action: 'email.send', token: pm, cohortId: cid, template: 'booksCode', emails: ['ana@example.com'] }).sent, ['ana@example.com']);
+  const m = state.emails[n];
+  assert.match(m.subject, /Ebooks/);
+  assert.match(m.options.htmlBody, /<b>Your Code: ANA42<\/b>/);
+  assert.match(m.options.htmlBody, /<a href="https:\/\/publications.adizes.com\/"[^>]*>Download your ebooks here<\/a>/);
+  assert.match(m.body, /Download your ebooks here: https:\/\/publications.adizes.com\//);
+  assert.match(m.body, /Warm regards,\nexecprogram$/, 'signed with the sender, no team signature');
+  assert.ok(!/Program team/.test(m.options.htmlBody));
+});
+t('LinkedIn email needs the guide and attaches it', () => {
+  const r0 = post({ action: 'email.send', token: pm, cohortId: cid, template: 'linkedin', emails: ['ana@example.com'] });
+  assert.equal(r0.failed[0].error, 'invalid_no_linkedin_guide');
+  state.drive.files['GUIDE0000000000000000000000000'] = { name: 'LinkedIn Guide.pdf' };
+  post({ action: 'settings.save', token: pm, settings: { linkedinGuideUrl: 'https://drive.google.com/file/d/GUIDE0000000000000000000000000/view?usp=sharing' } });
+  const n = state.emails.length;
+  assert.deepEqual(post({ action: 'email.send', token: pm, cohortId: cid, template: 'linkedin', emails: ['ana@example.com'] }).sent, ['ana@example.com']);
+  assert.equal(state.emails[n].options.attachments.map(a => a.getName()).join(), 'LinkedIn Guide.pdf');
+});
+t('certificate email: finds the PDF by name, attaches it with the guide, shares a link, marks it sent', () => {
+  const r0 = post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'] });
+  assert.equal(r0.failed[0].error, 'invalid_no_certificate');
+  state.drive.files['CERTANA00000000000000000000000'] = { name: 'Certificate - Ana López.pdf' };
+  state.drive.files['CERTOTHER0000000000000000000000'] = { name: 'Certificate - Juan Carlos Luna.pdf' };
+  state.drive.folders['FOLDER000000000000000000000000'] = ['CERTANA00000000000000000000000', 'CERTOTHER0000000000000000000000'];
+  post({ action: 'cohort.update', token: pm, id: cid, patch: { certFolderUrl: 'https://drive.google.com/drive/folders/FOLDER000000000000000000000000', code: 'C-AEP-107-26' } });
+  reload();
+  const ana = C.learners.find(l => l.email === 'ana@example.com');
+  state.drive.files['CERTANA00000000000000000000000'].name = 'Certificate - ' + ana.firstName + ' ' + ana.lastName + '.pdf';
+  const n = state.emails.length;
+  assert.equal(post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'], test: true }).test, true);
+  assert.equal(state.drive.files['CERTANA00000000000000000000000'].access, undefined, 'a test does not change sharing');
+  const r = post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'] });
+  assert.deepEqual(r.sent, ['ana@example.com'], JSON.stringify(r));
+  const m = state.emails[n + 1];
+  assert.equal(m.options.attachments.map(a => a.getName()).join('|'), 'Certificate - ' + ana.firstName + ' ' + ana.lastName + '.pdf|LinkedIn Guide.pdf');
+  assert.match(m.body, /Cohort C-AEP-107-26/);
+  assert.match(m.options.htmlBody, /href="https:\/\/drive.google.com\/file\/d\/CERTANA00000000000000000000000\/view"[^>]*>Download Certificate \(PDF\)/);
+  assert.ok(!/End of Program Survey\]|Complete the End of Program Survey/.test(m.body), 'no survey link configured → line left out');
+  assert.equal(state.drive.files['CERTANA00000000000000000000000'].access, 'ANYONE_WITH_LINK');
+  reload();
+  assert.equal(C.enrollments.find(e => e.email === 'ana@example.com').certificationSent, 'Yes');
+  // explicit link + date + survey link
+  post({ action: 'settings.save', token: pm, settings: { endSurveyUrl: 'https://adizes.typeform.com/to/END' } });
+  state.drive.files['CERTX000000000000000000000000'] = { name: 'whatever.pdf', noShare: true };
+  const e = C.enrollments.find(x => x.email === 'ana@example.com');
+  post({ action: 'enrollment.update', token: pm, id: e.id, patch: { certificateUrl: 'https://drive.google.com/file/d/CERTX000000000000000000000000/view', certificateDate: '2026-12-15' } });
+  post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'] });
+  const m2 = state.emails.at(-1);
+  assert.equal(m2.options.attachments[0].getName(), 'whatever.pdf');
+  assert.match(m2.body, /Dated December 15, 2026/);
+  assert.match(m2.body, /Complete the End of Program Survey: https:\/\/adizes.typeform.com\/to\/END/);
+  assert.ok(!/Download Certificate/.test(m2.body), 'sharing not allowed → only the attachment');
 });
 t('weekly feedback CSV replaces everything of the cohort', () => {
   reload();
