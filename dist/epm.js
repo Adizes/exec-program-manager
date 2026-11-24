@@ -1,4 +1,4 @@
-/*! Adizes · Exec Program Manager v1.4.0 · github.com/Adizes/exec-program-manager */
+/*! Adizes · Exec Program Manager v1.4.1 · github.com/Adizes/exec-program-manager */
 (function(){
 'use strict';
 /* ---- core.js ---- */
@@ -6,7 +6,7 @@
  * CORE — config, API client, state, DOM helpers, router, UI primitives
  * =================================================================================== */
 var CFG = window.EPM_CONFIG || {};
-var VERSION = "1.4.0";
+var VERSION = "1.4.1";
 var ROOT_ID = CFG.mount || 'epm-app';
 var LS_KEY = 'epm_session_v1';
 

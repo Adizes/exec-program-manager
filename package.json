@@ -1,6 +1,6 @@
 {
   "name": "adizes-exec-program-manager",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "private": true,
   "description": "Adizes Executive Program cohort manager (Webflow embed + Google Apps Script backend)",
   "type": "module",
