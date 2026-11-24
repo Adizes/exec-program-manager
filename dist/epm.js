@@ -43,7 +43,7 @@ var ERRORS = {
   invalid_sender: 'Emails cannot leave from execprogram@adizes.com: the Apps Script must be deployed with that account (see Settings → Integrations).',
   invalid_no_books_code: 'This learner has no books code yet.',
   invalid_no_certificate: 'No certificate found for this learner: add the certificates folder in the cohort Settings (file names with first and last name) or paste the certificate link in the learner’s Program tab.',
-  invalid_no_linkedin_guide: 'Add the LinkedIn Guide (Drive link) in Settings first: it is attached to this email.',
+  invalid_linkedin_guide: 'The LinkedIn guide could not be downloaded right now. Try again in a few minutes.',
   invalid_drive_file: 'The Google Drive link could not be opened. Check the link and that the account running the platform can see the file.',
   invalid_no_sme_email: 'This block has no SME with an account. Assign one in Settings → Structure.',
   invalid_too_many: 'Too many submissions. Please try again in a few minutes. · Demasiados envíos; intenta en unos minutos.',
@@ -2822,7 +2822,7 @@ function viewSettings(main) {
     presentThresholdPct: inputEl(st.presentThresholdPct, { type: 'number', min: '0', max: '100' }), riskAttendancePct: inputEl(st.riskAttendancePct, { type: 'number', min: '0', max: '100' }),
     riskLmsGapPct: inputEl(st.riskLmsGapPct, { type: 'number', min: '0', max: '100' }),
     typeformModuleFormId_en: inputEl(st.typeformModuleFormId_en, { placeholder: 'e.g. aBcD1234' }), typeformModuleFormId_es: inputEl(st.typeformModuleFormId_es),
-    linkedinGuideUrl: inputEl(st.linkedinGuideUrl, { placeholder: 'https://drive.google.com/file/d/…' }), endSurveyUrl: inputEl(st.endSurveyUrl, { placeholder: 'https://…' }),
+    endSurveyUrl: inputEl(st.endSurveyUrl, { placeholder: 'https://…' }),
   };
   main.appendChild(h('.epm-card', h('h3', 'Rules'),
     h('.epm-row3', field('Zoom: Present from (% of the session)', F.presentThresholdPct), field('At risk below attendance (%)', F.riskAttendancePct), field('At risk when LMS is behind by (points)', F.riskLmsGapPct)),
@@ -2830,8 +2830,8 @@ function viewSettings(main) {
     h('p.epm-small.epm-muted', 'The form must have the hidden fields email, name, cohort and module. A cohort can override the form in its own settings.'),
     h('.epm-row2', field('Form ID (English cohorts)', F.typeformModuleFormId_en), field('Form ID (Spanish cohorts)', F.typeformModuleFormId_es)),
     h('h3', 'Certificate & LinkedIn emails'),
-    h('p.epm-small.epm-muted', 'The LinkedIn Guide is a PDF in Google Drive; it is attached to the LinkedIn and certificate emails. Each cohort has its own certificates folder (cohort Settings).'),
-    h('.epm-row2', field('LinkedIn Guide (Drive link)', F.linkedinGuideUrl), field('End of Program Survey link', F.endSurveyUrl)),
+    h('p.epm-small.epm-muted', 'The LinkedIn guides (enrollment and graduation, English and Spanish) are attached automatically. Each cohort has its own certificates folder (cohort Settings).'),
+    h('.epm-row2', field('End of Program Survey link', F.endSurveyUrl), h('span')),
     h('.epm-actions', btn('Save settings', { kind: 'primary' }, function () {
       var p = {}; Object.keys(F).forEach(function (k) { p[k] = F[k].value; });
       api('settings.save', { settings: p }).then(function (r) { S.boot.settings = r.settings; toast('Saved'); S.cohorts = {}; }).catch(fail);

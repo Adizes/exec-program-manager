@@ -23,9 +23,11 @@ const routes = (url) => {
     { id: 'f1', type: 'opinion_scale' }, { id: 'f2', type: 'opinion_scale' }, { id: 'f3', type: 'opinion_scale' }, { id: 'f4', type: 'opinion_scale' }, { id: 'f5', type: 'opinion_scale' },
     { id: 'f6', type: 'long_text' }, { id: 'f7', type: 'long_text' }] }];
   if (url.includes('/responses')) return [200, { items: TF_ITEMS }];
+  if (url.includes('/assets/guides/linkedin-') && GUIDES_OK) return [200, '%PDF-guide ' + url.split('/').pop()];
   return null;
 };
 let TF_ITEMS = [];
+let GUIDES_OK = false;
 
 const { gas, state, post, login, sheet } = loadGas({
   routes, props: { TEACHABLE_API_KEY: 'k', TEACHABLE_BASIC_USER: 'u', TEACHABLE_BASIC_PASS: 'p', TYPEFORM_TOKEN: 'tf' },
@@ -368,14 +370,15 @@ t('books code email: Dani\'s copy, bold code, link, signed by the sender', () =>
   assert.match(m.body, /Warm regards,\nexecprogram$/, 'signed with the sender, no team signature');
   assert.ok(!/Program team/.test(m.options.htmlBody));
 });
-t('LinkedIn email needs the guide and attaches it', () => {
+t('LinkedIn email attaches the enrollment guide in the cohort language', () => {
   const r0 = post({ action: 'email.send', token: pm, cohortId: cid, template: 'linkedin', emails: ['ana@example.com'] });
-  assert.equal(r0.failed[0].error, 'invalid_no_linkedin_guide');
-  state.drive.files['GUIDE0000000000000000000000000'] = { name: 'LinkedIn Guide.pdf' };
-  post({ action: 'settings.save', token: pm, settings: { linkedinGuideUrl: 'https://drive.google.com/file/d/GUIDE0000000000000000000000000/view?usp=sharing' } });
+  assert.equal(r0.failed[0].error, 'invalid_linkedin_guide', 'guide not reachable → not sent');
+  GUIDES_OK = true;
   const n = state.emails.length;
   assert.deepEqual(post({ action: 'email.send', token: pm, cohortId: cid, template: 'linkedin', emails: ['ana@example.com'] }).sent, ['ana@example.com']);
-  assert.equal(state.emails[n].options.attachments.map(a => a.getName()).join(), 'LinkedIn Guide.pdf');
+  const a = state.emails[n].options.attachments;
+  assert.equal(a.map(x => x.getName()).join(), 'AEP LinkedIn Guide - Enrollment.pdf');
+  assert.match(Buffer.from(a[0].bytes).toString(), /linkedin-enrollment-en\.pdf/);
 });
 t('certificate email: finds the PDF by name, attaches it with the guide, shares a link, marks it sent', () => {
   const r0 = post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'] });
@@ -393,7 +396,7 @@ t('certificate email: finds the PDF by name, attaches it with the guide, shares 
   const r = post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'] });
   assert.deepEqual(r.sent, ['ana@example.com'], JSON.stringify(r));
   const m = state.emails[n + 1];
-  assert.equal(m.options.attachments.map(a => a.getName()).join('|'), 'Certificate - ' + ana.firstName + ' ' + ana.lastName + '.pdf|LinkedIn Guide.pdf');
+  assert.equal(m.options.attachments.map(a => a.getName()).join('|'), 'Certificate - ' + ana.firstName + ' ' + ana.lastName + '.pdf|AEP LinkedIn Guide - Graduation.pdf');
   assert.match(m.body, /Cohort C-AEP-107-26/);
   assert.match(m.options.htmlBody, /href="https:\/\/drive.google.com\/file\/d\/CERTANA00000000000000000000000\/view"[^>]*>Download Certificate \(PDF\)/);
   assert.ok(!/End of Program Survey\]|Complete the End of Program Survey/.test(m.body), 'no survey link configured → line left out');

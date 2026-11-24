@@ -67,7 +67,8 @@ export function loadGas(opts = {}) {
     getSheetByName: (n) => state.sheets[n] || null,
     insertSheet: (n) => (state.sheets[n] = new FakeSheet(n)),
   };
-  const resp = (code, body) => ({ getResponseCode: () => code, getContentText: () => (typeof body === 'string' ? body : JSON.stringify(body)) });
+  const resp = (code, body) => ({ getResponseCode: () => code, getContentText: () => (typeof body === 'string' ? body : JSON.stringify(body)),
+    getContent: () => Array.from(Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))) });
   const doFetch = (url, o = {}) => {
     state.fetches.push({ url, o });
     const r = state.routes(url, o);
@@ -88,7 +89,7 @@ export function loadGas(opts = {}) {
       DigestAlgorithm: { SHA_256: 'sha256' }, Charset: { UTF_8: 'utf8' },
       computeDigest: (alg, s) => Array.from(crypto.createHash('sha256').update(String(s), 'utf8').digest()).map(x => (x > 127 ? x - 256 : x)),
       getUuid: () => crypto.randomUUID(),
-      base64Encode: (s) => Buffer.from(String(s)).toString('base64'),
+      base64Encode: (s) => (Array.isArray(s) ? Buffer.from(s.map(x => x & 255)) : Buffer.from(String(s))).toString('base64'),
       formatDate: (d, tz, f) => {
         const p = new Intl.DateTimeFormat('en-CA', { timeZone: tz || state.tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
         return p; // yyyy-MM-dd

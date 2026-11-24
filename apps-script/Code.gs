@@ -78,7 +78,6 @@ const DEFAULT_SETTINGS = {
   typeformModuleFormId_en: '',
   typeformModuleFormId_es: '',
   typeformLastSync: '',
-  linkedinGuideUrl: '',           // Google Drive link of the LinkedIn Guide (PDF), attached to the LinkedIn and certificate emails
   endSurveyUrl: '',               // End of Program Survey link (certificate email)
   schemaVersion: '1',
 };
@@ -1173,9 +1172,7 @@ function learnerVars_(key, cohort, l, b) {
     vars.code = l.booksCode;
   }
   if (key === 'linkedin' || key === 'certificate') {
-    const guide = linkedinGuide_();
-    if (!guide) throw new Error('invalid_no_linkedin_guide');
-    vars._attachments = [guide];
+    vars._attachments = [linkedinGuide_(key === 'linkedin' ? 'enrollment' : 'graduation', cohort.language === 'es' ? 'es' : 'en')];
   }
   if (key === 'certificate') {
     const e = rows_('Enrollments').find(x => x.cohortId === cohort.id && x.email === l.email) || {};
@@ -1199,11 +1196,25 @@ function driveFile_(url) {
   if (!id) throw new Error('invalid_drive_file');
   try { return DriveApp.getFileById(id); } catch (e) { throw new Error('invalid_drive_file'); }
 }
-function linkedinGuide_() {
-  const url = settings_().linkedinGuideUrl;
-  if (!url) return null;
-  if (!MEMO_.__guide) MEMO_.__guide = driveFile_(url).getBlob();
-  return MEMO_.__guide;
+// LinkedIn guides (PDF) live in the repo: assets/guides/linkedin-<enrollment|graduation>-<en|es>.pdf
+const GUIDES_BASE = 'https://raw.githubusercontent.com/Adizes/exec-program-manager/main/assets/guides/';
+const GUIDE_NAMES = {
+  enrollment: { en: 'AEP LinkedIn Guide - Enrollment.pdf', es: 'AEP Guía de LinkedIn - Inscripción.pdf' },
+  graduation: { en: 'AEP LinkedIn Guide - Graduation.pdf', es: 'AEP Guía de LinkedIn - Graduación.pdf' },
+};
+function linkedinGuide_(kind, lang) {
+  const k = '__guide:' + kind + ':' + lang;
+  if (MEMO_[k]) return MEMO_[k];
+  const cache = CacheService.getScriptCache(), ck = 'guide_' + kind + '_' + lang;
+  let b64 = cache.get(ck);
+  if (!b64) {
+    const r = UrlFetchApp.fetch(GUIDES_BASE + 'linkedin-' + kind + '-' + lang + '.pdf', { muteHttpExceptions: true });
+    if (r.getResponseCode() !== 200) throw new Error('invalid_linkedin_guide');
+    b64 = Utilities.base64Encode(r.getContent());
+    try { cache.put(ck, b64, 21600); } catch (e) { /* too big for the cache: fetch every time */ }
+  }
+  MEMO_[k] = Utilities.newBlob(Utilities.base64Decode(b64), 'application/pdf', GUIDE_NAMES[kind][lang]);
+  return MEMO_[k];
 }
 // The learner's certificate: the link saved in their enrollment, or the PDF in the cohort's
 // certificates folder whose name contains their first and last name.

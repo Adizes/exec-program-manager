@@ -452,7 +452,7 @@ function viewSettings(main) {
     presentThresholdPct: inputEl(st.presentThresholdPct, { type: 'number', min: '0', max: '100' }), riskAttendancePct: inputEl(st.riskAttendancePct, { type: 'number', min: '0', max: '100' }),
     riskLmsGapPct: inputEl(st.riskLmsGapPct, { type: 'number', min: '0', max: '100' }),
     typeformModuleFormId_en: inputEl(st.typeformModuleFormId_en, { placeholder: 'e.g. aBcD1234' }), typeformModuleFormId_es: inputEl(st.typeformModuleFormId_es),
-    linkedinGuideUrl: inputEl(st.linkedinGuideUrl, { placeholder: 'https://drive.google.com/file/d/…' }), endSurveyUrl: inputEl(st.endSurveyUrl, { placeholder: 'https://…' }),
+    endSurveyUrl: inputEl(st.endSurveyUrl, { placeholder: 'https://…' }),
   };
   main.appendChild(h('.epm-card', h('h3', 'Rules'),
     h('.epm-row3', field('Zoom: Present from (% of the session)', F.presentThresholdPct), field('At risk below attendance (%)', F.riskAttendancePct), field('At risk when LMS is behind by (points)', F.riskLmsGapPct)),
@@ -460,8 +460,8 @@ function viewSettings(main) {
     h('p.epm-small.epm-muted', 'The form must have the hidden fields email, name, cohort and module. A cohort can override the form in its own settings.'),
     h('.epm-row2', field('Form ID (English cohorts)', F.typeformModuleFormId_en), field('Form ID (Spanish cohorts)', F.typeformModuleFormId_es)),
     h('h3', 'Certificate & LinkedIn emails'),
-    h('p.epm-small.epm-muted', 'The LinkedIn Guide is a PDF in Google Drive; it is attached to the LinkedIn and certificate emails. Each cohort has its own certificates folder (cohort Settings).'),
-    h('.epm-row2', field('LinkedIn Guide (Drive link)', F.linkedinGuideUrl), field('End of Program Survey link', F.endSurveyUrl)),
+    h('p.epm-small.epm-muted', 'The LinkedIn guides (enrollment and graduation, English and Spanish) are attached automatically. Each cohort has its own certificates folder (cohort Settings).'),
+    h('.epm-row2', field('End of Program Survey link', F.endSurveyUrl), h('span')),
     h('.epm-actions', btn('Save settings', { kind: 'primary' }, function () {
       var p = {}; Object.keys(F).forEach(function (k) { p[k] = F[k].value; });
       api('settings.save', { settings: p }).then(function (r) { S.boot.settings = r.settings; toast('Saved'); S.cohorts = {}; }).catch(fail);
