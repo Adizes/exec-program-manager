@@ -379,6 +379,8 @@ t('LinkedIn email attaches the enrollment guide in the cohort language', () => {
   const a = state.emails[n].options.attachments;
   assert.equal(a.map(x => x.getName()).join(), 'AEP LinkedIn Guide - Enrollment.pdf');
   assert.match(Buffer.from(a[0].bytes).toString(), /linkedin-enrollment-en\.pdf/);
+  post({ action: 'templates.test', token: pm, key: 'linkedin', lang: 'es' });
+  assert.equal(state.emails.at(-1).options.attachments.map(x => x.getName()).join(), 'AEP Guía de LinkedIn - Inscripción.pdf', 'template test attaches the guide too');
 });
 t('certificate email: finds the PDF by name, attaches it with the guide, shares a link, marks it sent', () => {
   const r0 = post({ action: 'email.send', token: pm, cohortId: cid, template: 'certificate', emails: ['ana@example.com'] });

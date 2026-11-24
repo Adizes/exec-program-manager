@@ -1116,7 +1116,9 @@ function templateTest_(b, user) {
   const key = String(b.key || ''), lang = b.lang === 'es' ? 'es' : 'en';
   const t = templateFor_(key, lang);
   const text = { subject: b.subject != null ? b.subject : t.subject, body: b.body != null ? b.body : t.body, cta: b.cta != null ? b.cta : t.cta };
-  deliver_(user.email, lang, text, sampleVars_(key, lang, user), { test: true });
+  // same attachments as the real email (the certificate itself is personal, so it is not included)
+  const attachments = key === 'linkedin' ? [linkedinGuide_('enrollment', lang)] : key === 'certificate' ? [linkedinGuide_('graduation', lang)] : null;
+  deliver_(user.email, lang, text, sampleVars_(key, lang, user), { test: true, attachments: attachments });
   return { ok: true, to: user.email };
 }
 
